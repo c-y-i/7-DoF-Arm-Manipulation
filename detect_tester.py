@@ -1,4 +1,9 @@
-from core.interfaces import ObjectDetector
+"""
+Block Detection Tester
+Author: Team 16
+"""
+
+from core.interfaces import ObjectDetectorD
 from core.interfaces import ArmController
 import json
 
