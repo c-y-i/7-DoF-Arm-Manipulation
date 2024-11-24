@@ -2,14 +2,13 @@
 MEAM 5200 Final Project
 
 ## Project Structure
-
-The project is organized into the following directories:
-
     lib/
-    ├── kinematics/    # Forward and inverse kinematics implementations
-    ├── trajectory/    # Trajectory planning and generation
-    ├── vision/       # Computer vision and object detection
-    └── utils/        # Utility functions and helpers
+    ├── calculateFK.py
+    ├── calcJacobian.py
+    ├── IK_position_null.py
+    ├── IK_velocity_null.py
+    ├── FK_velocity.py
+    └── Other scripts...
 
 ## Pick and Place Testing
 
