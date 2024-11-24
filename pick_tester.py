@@ -20,6 +20,7 @@ from lib.IK_position_null import IK
 from math import pi
 import time
 
+
 class VisualTester:
     def __init__(self, pick_pos, place_pos, save_animation=False):
         """Initialize visualizer with pick and place positions."""

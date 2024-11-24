@@ -3,9 +3,10 @@ Block Detection Tester
 Author: Team 16
 """
 
-from core.interfaces import ObjectDetectorD
+from core.interfaces import ObjectDetector
 from core.interfaces import ArmController
 import json
+
 
 
 class DetectTester:
@@ -24,19 +25,35 @@ class DetectTester:
         return objects
 
 
-class Controller:
-    def __init__(self) -> None:
-        pass
+    def detect_block(self):
+        """
+        TODO: Use camera to locate block,
+        Return its position, color, and orientation
 
-    def confirm_pick(self):
-        gripper_result = False
-        pos, force = ArmController().get_gripper_state()
-        print(json.dumps(pos, indent=3))
+        :return: dict of block data
+        """
 
-        print(json.dumps(force, indent=3))
+        block_data = {
+            "position": [0, 0, 0],
+            "orientation": "front"
+        }
+
+        return block_data
+    
+    
+# class Controller:
+#     def __init__(self) -> None:
+#         pass
+
+#     def confirm_pick(self):
+#         gripper_result = False
+#         pos, force = ArmController().get_gripper_state()
+#         print(json.dumps(pos, indent=3))
+
+#         print(json.dumps(force, indent=3))
         
-        # TODO: Implement gripper confirm logic
-        return gripper_result
+#         # TODO: Implement gripper confirm logic
+#         return gripper_result
 
 
 def main():
