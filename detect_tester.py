@@ -1,6 +1,7 @@
 """
 Block Detection Tester
 Author: Team 16
+TODO: Detection logic...
 """
 
 from core.interfaces import ObjectDetector
