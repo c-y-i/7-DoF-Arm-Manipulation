@@ -1,6 +1,7 @@
 """
 Block Detection Tester
 Author: Team 16
+TODO: Detection logic...
 """
 
 import rospy
