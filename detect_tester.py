@@ -1,7 +1,7 @@
 """
 Block Detection Tester
 Author: Team 16
-TODO: Detection logic...
+TODO: semi implementation of the detect_tester.py
 """
 
 import rospy
