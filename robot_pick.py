@@ -29,36 +29,44 @@ class RobotPickAndPlace:
         self.tf_broad = tf.TransformBroadcaster()
         self.target_pub = rospy.Publisher('/vis/target', visualization_msgs.msg.Marker, queue_size=10)
         self.trajectory_pub = rospy.Publisher('/vis/trajectory', visualization_msgs.msg.Marker, queue_size=10)
+        self.latest_blocks = []
+        self.detection_rate = rospy.Rate(10)  # 10Hz = 100ms period
+        self.blocks_detected = False
 
-    def get_block_detections(self):
-        """Get the list of detected blocks with their positions and orientations in the world frame."""
+    def monitor_blocks(self):
+        """Update block detections."""
         try:
             detections = self.detector.get_detections()
-            if not detections:
-                raise ValueError("No blocks detected by the ObjectDetector.")
-            blocks = []
-            for block_id, block_pose in detections:
-                # Transform block pose from camera frame to world frame
-                H_ee_camera = self.detector.get_H_ee_camera()
-                T_base_ee = self.arm.get_current_transformation()
-                T_base_camera = T_base_ee @ H_ee_camera
-                block_pose_world = T_base_camera @ block_pose
+            if detections:
+                blocks = []
+                for block_id, block_pose in detections:
+                    # Transform block pose from camera frame to world frame
+                    H_ee_camera = self.detector.get_H_ee_camera()
+                    T_base_ee = self.arm.get_current_transformation()
+                    T_base_camera = T_base_ee @ H_ee_camera
+                    block_pose_world = T_base_camera @ block_pose
 
-                position = block_pose_world[:3, 3]
-                rotation_matrix = block_pose_world[:3, :3]
-                orientation = R.from_matrix(rotation_matrix).as_euler('xyz')
+                    position = block_pose_world[:3, 3]
+                    rotation_matrix = block_pose_world[:3, :3]
+                    orientation = R.from_matrix(rotation_matrix).as_euler('xyz')
 
-                block_data = {
-                    'id': block_id,
-                    'position': position,
-                    'orientation': orientation,
-                    'transform': block_pose_world
-                }
-                blocks.append(block_data)
-            return blocks
+                    block_data = {
+                        'id': block_id,
+                        'position': position,
+                        'orientation': orientation,
+                        'transform': block_pose_world
+                    }
+                    blocks.append(block_data)
+                self.latest_blocks = blocks
+                self.blocks_detected = True
+                return True
         except Exception as e:
-            print(f"Error in get_block_detections: {e}")
-            return []
+            rospy.logwarn(f"Error in monitor_blocks: {e}")
+        return False
+
+    def get_block_detections(self):
+        """Get the latest block detections."""
+        return self.latest_blocks
 
     def align_gripper_with_block(self, block_orientation):
         """Compute the required wrist orientation to align the gripper with the block's orientation."""
@@ -74,8 +82,16 @@ class RobotPickAndPlace:
     def move_to_pose(self, target_pose, current_joints=None):
         """Move the robot to a target pose using inverse kinematics."""
         if current_joints is None:
-            current_joints = self.arm.get_joint_positions()
-        joints, _, success, _ = self.ik.inverse(target_pose, seed_q=current_joints, method='J_pseudo', alpha=0.1)
+            current_joints = self.arm.get_positions()
+        
+        # Call inverse with correct argument order: target, seed, method, alpha
+        joints, _, success, _ = self.ik.inverse(
+            target=target_pose,
+            seed=current_joints,
+            method='J_pseudo',
+            alpha=0.1
+        )
+        
         if success:
             self.arm.safe_move_to_position(joints)
             return joints
@@ -204,11 +220,45 @@ class RobotPickAndPlace:
         gripper_marker.color.a = 1.0
         self.target_pub.publish(gripper_marker)
 
+    def move_to_observation_pose(self):
+        """Move the robot to a position suitable for observing blocks."""
+        # Define observation pose (adjust these coordinates as needed)
+        obs_position = np.array([0.5, -0.1, 0.5])  # Above the workspace
+        # Use a downward-facing orientation
+        obs_orientation = R.from_euler('xyz', [pi, 0, 0]).as_matrix()
+        
+        obs_pose = np.eye(4)
+        obs_pose[:3, :3] = obs_orientation
+        obs_pose[:3, 3] = obs_position
+        
+        print("Moving to observation position...")
+        try:
+            self.move_to_pose(obs_pose)
+            print("Successfully moved to observation position")
+        except Exception as e:
+            print(f"Failed to move to observation position: {e}")
+
     def run(self):
         """Main routine to execute pick and place operations."""
         rospy.sleep(1)  # Wait for the system to be ready
-        place_position = np.array([0.5, 0.0, 0.0])  # Define a fixed place position
-        self.execute_pick_and_place(place_position)
+        
+        # Move to observation pose
+        self.move_to_observation_pose()
+        rospy.sleep(2)  # Wait for the system to settle
+
+        place_position = np.array([0.5, 0.0, 0.0])
+        pick_and_place_done = False
+
+        while not rospy.is_shutdown():
+            # Update block detections
+            blocks_found = self.monitor_blocks()
+            
+            # Execute pick and place once blocks are detected
+            if blocks_found and not pick_and_place_done:
+                self.execute_pick_and_place(place_position)
+                pick_and_place_done = True
+            
+            self.detection_rate.sleep()
 
 def main():
     """Main function to run the robot pick and place module."""
