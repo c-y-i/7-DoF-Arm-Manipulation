@@ -9,46 +9,44 @@ import numpy as np
 from core.interfaces import ObjectDetector
 from core.interfaces import ArmController
 from scipy.spatial.transform import Rotation as R
-
+import visualization_msgs.msg  # Add this import
+import tf  # Add this import
+from math import pi
 
 class DetectTester:
+    """Tester class for block detection using the ObjectDetector."""
+
     def __init__(self):
         """Initialize the object detection tester."""
         print("\nInitializing Object Detection Tester...")
         self.detector = ObjectDetector()
         self.arm = ArmController()
+        self.target_pub = rospy.Publisher('/visualization_marker', visualization_msgs.msg.Marker, queue_size=10)  # Add this line
     
-    def test_detect(self):
-        """Test the object detection algorithm."""
-        print("\nTesting object detection algorithm...")
-        
-        # Get blocks detected by camera
-        detections = self.detector.get_detections()
-        
-        # Process each detection
-        processed_blocks = []
-        for block_name, block_pose in detections:
-            # Extract position from homogeneous transform
-            position = block_pose[:3, 3]
-            
-            # Extract rotation matrix and convert to Euler angles
-            rotation = block_pose[:3, :3]
-            euler = R.from_matrix(rotation).as_euler('xyz')
-            
-            block_data = {
-                'name': block_name,
-                'position': position,
-                'orientation': euler,
-                'transform': block_pose
-            }
-            processed_blocks.append(block_data)
-            
-            # Print detection info
-            print(f"\nDetected block: {block_name}")
-            print(f"Position: {position}")
-            print(f"Orientation (xyz): {euler}")
-        
-        return processed_blocks
+    def get_detections(self):
+        """Get and process the detections from the object detector."""
+        try:
+            detections = self.detector.get_detections()
+            if not detections:
+                raise ValueError("No blocks detected by the ObjectDetector.")
+            processed_blocks = []
+            for block_id, block_pose in detections:
+                # Extract position and orientation
+                position = block_pose[:3, 3]
+                rotation_matrix = block_pose[:3, :3]
+                orientation = R.from_matrix(rotation_matrix).as_euler('xyz')
+
+                block_data = {
+                    'id': block_id,
+                    'position': position,
+                    'orientation': orientation,
+                    'transform': block_pose
+                }
+                processed_blocks.append(block_data)
+            return processed_blocks
+        except Exception as e:
+            print(f"Error in get_detections: {e}")
+            return []
 
     def detect_block(self):
         """
@@ -57,7 +55,7 @@ class DetectTester:
 
         :return: dict of block data
         """
-        blocks = self.test_detect()
+        blocks = self.get_detections()
         if not blocks:
             return None
         
@@ -103,18 +101,14 @@ def main():
     print("Starting block detection test...")
     
     try:
-        # Test block detection
-        blocks = tester.test_detect()
-        
-        if not blocks:
-            print("No blocks detected!")
-        else:
-            print(f"\nSuccessfully detected {len(blocks)} blocks!")
-            
-        # Test grasp confirmation
-        print("\nTesting grasp confirmation...")
-        is_grasped = tester.confirm_pick()
-        print(f"Grasp detected: {is_grasped}")
+        # For testing with generated data
+        tester.test_with_generated_data()
+
+        # Uncomment the following lines for actual use with the robot
+        # tester.display_detections()
+        # blocks = tester.get_detections()
+        # if blocks:
+        #     tester.visualize_blocks(blocks)
         
     except Exception as e:
         print(f"Error during testing: {str(e)}")

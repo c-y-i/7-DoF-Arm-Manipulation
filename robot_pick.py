@@ -2,8 +2,6 @@
 Pick logic for the robot arm.
 Author: Team 16
 
-NOTE: This is mostly by Copilot, i have no idea whether this will work or not, 
-Simulation on VM does not work on my laptop. - Yi (11/23/2024)
 """
 
 import numpy as np
@@ -11,184 +9,212 @@ from math import pi
 import rospy
 import tf
 import geometry_msgs.msg
-import visualization_msgs
-from tf.transformations import quaternion_from_matrix
+import visualization_msgs.msg
+from scipy.spatial.transform import Rotation as R
 from core.interfaces import ArmController
+from core.interfaces import ObjectDetector
 from lib.calculateFK import FK
 from lib.IK_position_null import IK
+from detect_visual import DetectVisualTester  # Import the visualization class
 
 class RobotPickAndPlace:
+    """Robot pick and place controller that detects blocks and executes pick and place operations."""
+
     def __init__(self):
         """Initialize the pick and place controller."""
-        print("\nInitializing Robot Pick and Place Controller...")
         self.arm = ArmController()
+        self.detector = ObjectDetector()
         self.fk = FK()
         self.ik = IK(linear_tol=1e-3, angular_tol=1e-2, max_steps=200)
-        
-        # Add visualization publishers
         self.tf_broad = tf.TransformBroadcaster()
         self.target_pub = rospy.Publisher('/vis/target', visualization_msgs.msg.Marker, queue_size=10)
         self.trajectory_pub = rospy.Publisher('/vis/trajectory', visualization_msgs.msg.Marker, queue_size=10)
-        
-    def generate_trajectory(self, pick_pos, place_pos):
-        """Generate waypoints for pick and place operation."""
-        print("\nGenerating trajectory waypoints...")
-        
-        # Define waypoints with safety height offset
-        z_offset = 0.3
-        start_pos = np.array([0.3, 0, 0.5])  # Starting position
-        
-        waypoints = [
-            start_pos,
-            pick_pos + np.array([0, 0, z_offset]),  # Pre-pick
-            pick_pos,  # Pick position
-            pick_pos + np.array([0, 0, z_offset]),  # Post-pick
-            place_pos + np.array([0, 0, z_offset]),  # Pre-place
-            place_pos  # Place position
-        ]
-        
-        return waypoints
-    
-    def move_to_position(self, target_pos, current_joints=None):
-        """Move the robot to a target position with IK."""
-        target = np.eye(4)
-        target[:3,3] = target_pos
-        target[:3,:3] = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])  # End effector orientation
-        
+
+    def get_block_detections(self):
+        """Get the list of detected blocks with their positions and orientations in the world frame."""
+        try:
+            detections = self.detector.get_detections()
+            if not detections:
+                raise ValueError("No blocks detected by the ObjectDetector.")
+            blocks = []
+            for block_id, block_pose in detections:
+                # Transform block pose from camera frame to world frame
+                H_ee_camera = self.detector.get_H_ee_camera()
+                T_base_ee = self.arm.get_current_transformation()
+                T_base_camera = T_base_ee @ H_ee_camera
+                block_pose_world = T_base_camera @ block_pose
+
+                position = block_pose_world[:3, 3]
+                rotation_matrix = block_pose_world[:3, :3]
+                orientation = R.from_matrix(rotation_matrix).as_euler('xyz')
+
+                block_data = {
+                    'id': block_id,
+                    'position': position,
+                    'orientation': orientation,
+                    'transform': block_pose_world
+                }
+                blocks.append(block_data)
+            return blocks
+        except Exception as e:
+            print(f"Error in get_block_detections: {e}")
+            return []
+
+    def align_gripper_with_block(self, block_orientation):
+        """Compute the required wrist orientation to align the gripper with the block's orientation."""
+        try:
+            # Construct the desired rotation matrix from block orientation
+            desired_rotation = R.from_euler('xyz', block_orientation).as_matrix()
+            return desired_rotation
+        except Exception as e:
+            print(f"Error in align_gripper_with_block: {e}")
+            # Return default orientation if error occurs
+            return np.eye(3)
+
+    def move_to_pose(self, target_pose, current_joints=None):
+        """Move the robot to a target pose using inverse kinematics."""
         if current_joints is None:
-            current_joints = np.array([0, 0, 0, -pi/2, 0, pi/2, pi/4])
-            
-        joints, _, success, _ = self.ik.inverse(target, current_joints, method='J_pseudo', alpha=0.1)
-        
+            current_joints = self.arm.get_joint_positions()
+        joints, _, success, _ = self.ik.inverse(target_pose, seed_q=current_joints, method='J_pseudo', alpha=0.1)
         if success:
             self.arm.safe_move_to_position(joints)
             return joints
         else:
-            raise Exception(f"IK failed for position {target_pos}")
-    
-    def show_pose(self, H, frame):
-        """Broadcast a frame using the transform from given frame to world frame."""
-        self.tf_broad.sendTransform(
-            tf.transformations.translation_from_matrix(H),
-            tf.transformations.quaternion_from_matrix(H),
-            rospy.Time.now(),
-            frame,
-            "world"
-        )
-        
-    def visualize_target(self, position, color=[1.0, 0.0, 0.0], scale=0.05):
-        """Visualize target position as a sphere in RViz."""
-        marker = visualization_msgs.msg.Marker()
-        marker.header.frame_id = "world"
-        marker.header.stamp = rospy.Time.now()
-        marker.type = visualization_msgs.msg.Marker.SPHERE
-        marker.action = visualization_msgs.msg.Marker.ADD
-        
-        marker.pose.position.x = position[0]
-        marker.pose.position.y = position[1]
-        marker.pose.position.z = position[2]
-        marker.pose.orientation.w = 1.0
-        
-        marker.scale.x = scale
-        marker.scale.y = scale
-        marker.scale.z = scale
-        
-        marker.color.r = color[0]
-        marker.color.g = color[1]
-        marker.color.b = color[2]
-        marker.color.a = 0.8
-        
-        self.target_pub.publish(marker)
-        
-    def visualize_trajectory(self, waypoints):
-        """Visualize planned trajectory in RViz."""
-        marker = visualization_msgs.msg.Marker()
-        marker.header.frame_id = "world"
-        marker.header.stamp = rospy.Time.now()
-        marker.type = visualization_msgs.msg.Marker.LINE_STRIP
-        marker.action = visualization_msgs.msg.Marker.ADD
-        
-        for point in waypoints:
-            p = geometry_msgs.msg.Point()
-            p.x = point[0]
-            p.y = point[1]
-            p.z = point[2]
-            marker.points.append(p)
-            
-        marker.scale.x = 0.01  # line width
-        marker.color.r = 0.0
-        marker.color.g = 1.0
-        marker.color.b = 0.0
-        marker.color.a = 0.5
-        
-        self.trajectory_pub.publish(marker)
+            raise Exception("IK failed to find a solution.")
 
-    def execute_pick_and_place(self, pick_pos, place_pos):
-        """Execute complete pick and place operation with visualization."""
-        print("\nExecuting pick and place operation...")
-        
-        # Visualize pick and place targets
-        self.visualize_target(pick_pos, color=[1.0, 0.0, 0.0])  # Red for pick
-        self.visualize_target(place_pos, color=[0.0, 1.0, 0.0])  # Green for place
-        
-        # Generate and visualize waypoints
-        waypoints = self.generate_trajectory(pick_pos, place_pos)
-        self.visualize_trajectory(waypoints)
-        
-        # Move to neutral position
-        print("Moving to neutral position...")
-        self.arm.safe_move_to_position(self.arm.neutral_position())
-        
-        # Execute trajectory
-        current_joints = None
-        for i, pos in enumerate(waypoints):
-            print(f"Moving to waypoint {i+1}/{len(waypoints)}")
-            
-            target = np.eye(4)
-            target[:3,3] = pos
-            target[:3,:3] = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
-            self.show_pose(target, f"target_{i}")
-            
+    def pick_block(self, block):
+        """Execute the pick operation for a given block."""
+        # Open gripper
+        self.arm.open_gripper()
+
+        # Compute pre-grasp pose above the block
+        pre_grasp_position = block['position'] + np.array([0, 0, 0.1])  # Approach from above
+        desired_orientation = self.align_gripper_with_block(block['orientation'])
+        pre_grasp_pose = np.eye(4)
+        pre_grasp_pose[:3, :3] = desired_orientation
+        pre_grasp_pose[:3, 3] = pre_grasp_position
+
+        # Move to pre-grasp pose
+        self.move_to_pose(pre_grasp_pose)
+
+        # Move to grasp pose
+        grasp_pose = np.copy(pre_grasp_pose)
+        grasp_pose[:3, 3] = block['position'] + np.array([0, 0, 0.02])  # Adjust for block height
+        self.move_to_pose(grasp_pose)
+
+        # Close gripper to grasp the block
+        self.arm.close_gripper()
+
+        # Lift the block
+        self.move_to_pose(pre_grasp_pose)
+
+        # Visualize the gripper and block positions
+        gripper_transform = self.arm.get_current_transformation()
+        visualizer = DetectVisualTester()
+        visualizer.visualize_gripper_and_block(block, gripper_transform)
+
+    def place_block(self, place_position, block_orientation):
+        """Execute the place operation at the specified position and orientation."""
+        # Compute pre-place pose above the target location
+        pre_place_position = place_position + np.array([0, 0, 0.1])
+        desired_orientation = self.align_gripper_with_block(block_orientation)
+        pre_place_pose = np.eye(4)
+        pre_place_pose[:3, :3] = desired_orientation
+        pre_place_pose[:3, 3] = pre_place_position
+
+        # Move to pre-place pose
+        self.move_to_pose(pre_place_pose)
+
+        # Move to place pose
+        place_pose = np.copy(pre_place_pose)
+        place_pose[:3, 3] = place_position + np.array([0, 0, 0.02])
+        self.move_to_pose(place_pose)
+
+        # Open gripper to release the block
+        self.arm.open_gripper()
+
+        # Retract to pre-place pose
+        self.move_to_pose(pre_place_pose)
+
+    def execute_pick_and_place(self, place_position):
+        """Detect blocks and execute pick and place operations."""
+        blocks = self.get_block_detections()
+        if not blocks:
+            print("No blocks detected.")
+            return
+
+        for block in blocks:
+            print(f"Picking block {block['id']} at position {block['position']}")
             try:
-                current_joints = self.move_to_position(pos, current_joints)
-                
-                # Gripper control with visualization update
-                if np.array_equal(pos, pick_pos):
-                    print("Closing gripper...")
-                    self.arm.close_gripper()
-                    # Update pick target visualization
-                    self.visualize_target(pick_pos, color=[0.5, 0.5, 0.5])  # Grey out picked target
-                elif np.array_equal(pos, place_pos):
-                    print("Opening gripper...")
-                    self.arm.open_gripper()
-                    
+                self.pick_block(block)
+                print(f"Placing block {block['id']} at position {place_position}")
+                self.place_block(place_position, block['orientation'])
             except Exception as e:
-                print(f"Error at waypoint {i+1}: {e}")
-                return False
-                
-        # Return to neutral position
-        print("Returning to neutral position...")
-        self.arm.safe_move_to_position(self.arm.neutral_position())
-        return True
+                print(f"Failed to pick and place block {block['id']}: {e}")
+
+    def visualize_gripper_and_block(self, block_transform):
+        """Visualize the gripper and the block in RViz."""
+        # Visualize the block as a marker
+        block_marker = visualization_msgs.msg.Marker()
+        block_marker.header.frame_id = "world"
+        block_marker.header.stamp = rospy.Time.now()
+        block_marker.id = 0
+        block_marker.type = visualization_msgs.msg.Marker.CUBE
+        block_marker.action = visualization_msgs.msg.Marker.ADD
+        block_marker.pose.position.x = block_transform[0, 3]
+        block_marker.pose.position.y = block_transform[1, 3]
+        block_marker.pose.position.z = block_transform[2, 3]
+        quaternion = tf.transformations.quaternion_from_matrix(block_transform)
+        block_marker.pose.orientation.x = quaternion[0]
+        block_marker.pose.orientation.y = quaternion[1]
+        block_marker.pose.orientation.z = quaternion[2]
+        block_marker.pose.orientation.w = quaternion[3]
+        block_marker.scale.x = 0.04  # Block dimensions
+        block_marker.scale.y = 0.04
+        block_marker.scale.z = 0.04
+        block_marker.color.r = 1.0
+        block_marker.color.g = 0.0
+        block_marker.color.b = 0.0
+        block_marker.color.a = 1.0
+        self.target_pub.publish(block_marker)
+
+        # Visualize the gripper as a marker
+        gripper_pose = self.arm.get_current_transformation()
+        gripper_marker = visualization_msgs.msg.Marker()
+        gripper_marker.header.frame_id = "world"
+        gripper_marker.header.stamp = rospy.Time.now()
+        gripper_marker.id = 1
+        gripper_marker.type = visualization_msgs.msg.Marker.MESH_RESOURCE
+        gripper_marker.mesh_resource = "package://franka_description/meshes/hand/hand.dae"
+        gripper_marker.action = visualization_msgs.msg.Marker.ADD
+        gripper_marker.pose.position.x = gripper_pose[0, 3]
+        gripper_marker.pose.position.y = gripper_pose[1, 3]
+        gripper_marker.pose.position.z = gripper_pose[2, 3]
+        quaternion = tf.transformations.quaternion_from_matrix(gripper_pose)
+        gripper_marker.pose.orientation.x = quaternion[0]
+        gripper_marker.pose.orientation.y = quaternion[1]
+        gripper_marker.pose.orientation.z = quaternion[2]
+        gripper_marker.pose.orientation.w = quaternion[3]
+        gripper_marker.scale.x = 1.0
+        gripper_marker.scale.y = 1.0
+        gripper_marker.scale.z = 1.0
+        gripper_marker.color.r = 0.5
+        gripper_marker.color.g = 0.5
+        gripper_marker.color.b = 0.5
+        gripper_marker.color.a = 1.0
+        self.target_pub.publish(gripper_marker)
+
+    def run(self):
+        """Main routine to execute pick and place operations."""
+        rospy.sleep(1)  # Wait for the system to be ready
+        place_position = np.array([0.5, 0.0, 0.0])  # Define a fixed place position
+        self.execute_pick_and_place(place_position)
 
 def main():
-    """Main function to run pick and place operation."""
+    """Main function to run the robot pick and place module."""
     rospy.init_node("robot_pick_and_place")
-    
-    # Define pick and place positions
-    pick_pos = np.array([0.3, -0.2, 0.1])
-    place_pos = np.array([0.3, 0.2, 0.1])
-    
     controller = RobotPickAndPlace()
-    
-    try:
-        success = controller.execute_pick_and_place(pick_pos, place_pos)
-        if success:
-            print("\nPick and place operation completed successfully!")
-        else:
-            print("\nPick and place operation failed!")
-    except Exception as e:
-        print(f"\nError during pick and place operation: {e}")
+    controller.run()
 
 if __name__ == "__main__":
     main()
