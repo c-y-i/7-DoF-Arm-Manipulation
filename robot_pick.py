@@ -16,6 +16,7 @@ from core.interfaces import ObjectDetector
 from lib.calculateFK import FK
 from lib.IK_position_null import IK
 from detect_visual import DetectVisualTester  # Import the visualization class
+import detect_pick
 
 class RobotPickAndPlace:
     """Robot pick and place controller that detects blocks and executes pick and place operations."""
@@ -24,6 +25,7 @@ class RobotPickAndPlace:
         """Initialize the pick and place controller."""
         self.arm = ArmController()
         self.detector = ObjectDetector()
+        
         self.fk = FK()
         self.ik = IK(linear_tol=1e-3, angular_tol=1e-2, max_steps=200)
         self.tf_broad = tf.TransformBroadcaster()
@@ -33,6 +35,14 @@ class RobotPickAndPlace:
         self.detection_rate = rospy.Rate(10)  # 10Hz = 100ms period
         self.blocks_detected = False
 
+    def get_current_transformation(self):
+        """Get the current end-effector transformation matrix using FK."""
+        current_joints = self.arm.get_positions()
+        # Use FK to get the transformation matrix
+        joint_positions = np.array([current_joints])  # FK expects a 2D array
+        T, _ = self.fk.forward(joint_positions)
+        return np.array(T)  # Convert to numpy array to ensure proper matrix operations
+
     def monitor_blocks(self):
         """Update block detections."""
         try:
@@ -40,11 +50,17 @@ class RobotPickAndPlace:
             if detections:
                 blocks = []
                 for block_id, block_pose in detections:
+                    print(block_pose)
                     # Transform block pose from camera frame to world frame
                     H_ee_camera = self.detector.get_H_ee_camera()
-                    T_base_ee = self.arm.get_current_transformation()
-                    T_base_camera = T_base_ee @ H_ee_camera
-                    block_pose_world = T_base_camera @ block_pose
+                    T_base_ee = self.get_current_transformation()
+                    
+                    # Ensure all matrices are numpy arrays
+                    H_ee_camera = np.array(H_ee_camera)
+                    block_pose = np.array(block_pose)
+                    
+                    T_base_camera = np.matmul(T_base_ee, H_ee_camera)
+                    block_pose_world = np.matmul(T_base_camera, block_pose)
 
                     position = block_pose_world[:3, 3]
                     rotation_matrix = block_pose_world[:3, :3]
@@ -62,6 +78,7 @@ class RobotPickAndPlace:
                 return True
         except Exception as e:
             rospy.logwarn(f"Error in monitor_blocks: {e}")
+            rospy.logwarn(f"Stack trace:", exc_info=True)  # Add this to get more error details
         return False
 
     def get_block_detections(self):
@@ -168,93 +185,80 @@ class RobotPickAndPlace:
             except Exception as e:
                 print(f"Failed to pick and place block {block['id']}: {e}")
 
-    def visualize_gripper_and_block(self, block_transform):
-        """Visualize the gripper and the block in RViz."""
-        # Visualize the block as a marker
-        block_marker = visualization_msgs.msg.Marker()
-        block_marker.header.frame_id = "world"
-        block_marker.header.stamp = rospy.Time.now()
-        block_marker.id = 0
-        block_marker.type = visualization_msgs.msg.Marker.CUBE
-        block_marker.action = visualization_msgs.msg.Marker.ADD
-        block_marker.pose.position.x = block_transform[0, 3]
-        block_marker.pose.position.y = block_transform[1, 3]
-        block_marker.pose.position.z = block_transform[2, 3]
-        quaternion = tf.transformations.quaternion_from_matrix(block_transform)
-        block_marker.pose.orientation.x = quaternion[0]
-        block_marker.pose.orientation.y = quaternion[1]
-        block_marker.pose.orientation.z = quaternion[2]
-        block_marker.pose.orientation.w = quaternion[3]
-        block_marker.scale.x = 0.04  # Block dimensions
-        block_marker.scale.y = 0.04
-        block_marker.scale.z = 0.04
-        block_marker.color.r = 1.0
-        block_marker.color.g = 0.0
-        block_marker.color.b = 0.0
-        block_marker.color.a = 1.0
-        self.target_pub.publish(block_marker)
-
-        # Visualize the gripper as a marker
-        gripper_pose = self.arm.get_current_transformation()
-        gripper_marker = visualization_msgs.msg.Marker()
-        gripper_marker.header.frame_id = "world"
-        gripper_marker.header.stamp = rospy.Time.now()
-        gripper_marker.id = 1
-        gripper_marker.type = visualization_msgs.msg.Marker.MESH_RESOURCE
-        gripper_marker.mesh_resource = "package://franka_description/meshes/hand/hand.dae"
-        gripper_marker.action = visualization_msgs.msg.Marker.ADD
-        gripper_marker.pose.position.x = gripper_pose[0, 3]
-        gripper_marker.pose.position.y = gripper_pose[1, 3]
-        gripper_marker.pose.position.z = gripper_pose[2, 3]
-        quaternion = tf.transformations.quaternion_from_matrix(gripper_pose)
-        gripper_marker.pose.orientation.x = quaternion[0]
-        gripper_marker.pose.orientation.y = quaternion[1]
-        gripper_marker.pose.orientation.z = quaternion[2]
-        gripper_marker.pose.orientation.w = quaternion[3]
-        gripper_marker.scale.x = 1.0
-        gripper_marker.scale.y = 1.0
-        gripper_marker.scale.z = 1.0
-        gripper_marker.color.r = 0.5
-        gripper_marker.color.g = 0.5
-        gripper_marker.color.b = 0.5
-        gripper_marker.color.a = 1.0
-        self.target_pub.publish(gripper_marker)
-
     def move_to_observation_pose(self):
         """Move the robot to a position suitable for observing blocks."""
-        # Define observation pose (adjust these coordinates as needed)
-        obs_position = np.array([0.5, -0.1, 0.5])  # Above the workspace
-        # Use a downward-facing orientation
-        obs_orientation = R.from_euler('xyz', [pi, 0, 0]).as_matrix()
-        
-        obs_pose = np.eye(4)
-        obs_pose[:3, :3] = obs_orientation
-        obs_pose[:3, 3] = obs_position
-        
-        print("Moving to observation position...")
         try:
-            self.move_to_pose(obs_pose)
-            print("Successfully moved to observation position")
+            # First try to get current position and print it
+            current_pos = self.arm.get_positions()
+            print("Current joint positions:", current_pos)
+
+            # Move to neutral with direct joint commands
+            neutral = self.arm.neutral_position()
+            print("Neutral position:", neutral)
+            
+            # # Move joints incrementally towards neutral
+            # steps = 2
+            # for i in range(steps + 1):
+            #     fraction = i / steps
+            #     intermediate = current_pos + (neutral - current_pos) * fraction
+            #     print(f"Moving to intermediate position {i}/{steps}")
+            #     self.arm.safe_move_to_position(intermediate)
+            #     rospy.sleep(0.2)
+            
+            print("Reached neutral position")
+            rospy.sleep(0.5)  # Wait for stability
+            
+            # Now move to observation pose
+            obs_position = np.array([0.5, -0.1, 0.5])  # Even more conservative position
+            obs_orientation = R.from_euler('xyz', [pi, 0, 0]).as_matrix()  # Simpler orientation
+            
+            obs_pose = np.eye(4)
+            obs_pose[:3, :3] = obs_orientation
+            obs_pose[:3, 3] = obs_position
+            
+            print("Computing IK for observation pose...")
+            joints, _, success, message = self.ik.inverse(
+                obs_pose,
+                neutral,  # Use neutral position as seed
+                method='J_pseudo',
+                alpha=0.5  # Increased alpha for better convergence
+            )
+            
+            if success:
+                print("Moving to observation pose...")
+                self.arm.safe_move_to_position(joints)
+                print("Successfully reached observation pose")
+                return True
+            else:
+                print(f"IK failed to find solution: {message}")
+                return False
+                
         except Exception as e:
-            print(f"Failed to move to observation position: {e}")
+            print(f"Error during movement: {str(e)}")
+            return False
 
     def run(self):
         """Main routine to execute pick and place operations."""
         rospy.sleep(1)  # Wait for the system to be ready
         
-        # Move to observation pose
-        self.move_to_observation_pose()
+        # Move to observation pose with error handling
+        if not self.move_to_observation_pose():
+            print("Could not reach observation pose, aborting...")
+            return
+        
         rospy.sleep(2)  # Wait for the system to settle
-
+        blocks = {}
         place_position = np.array([0.5, 0.0, 0.0])
         pick_and_place_done = False
-
         while not rospy.is_shutdown():
             # Update block detections
-            blocks_found = self.monitor_blocks()
-            
+            detections = self.detector.get_detections()
+
+            block_data = detect_pick.Detection().scan_blocks(1, detections) if detections else None
+            print(block_data)
+            blocks = block_data
             # Execute pick and place once blocks are detected
-            if blocks_found and not pick_and_place_done:
+            if blocks and not pick_and_place_done:
                 self.execute_pick_and_place(place_position)
                 pick_and_place_done = True
             
