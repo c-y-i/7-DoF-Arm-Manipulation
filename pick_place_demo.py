@@ -1,89 +1,280 @@
-
-"""
-Pick and Place Demo with Detection
-Author: Team 16
-"""
-
-import rospy
+import sys
 import numpy as np
-from math import pi
-from detect_tester import DetectTester
-from robot_pick import RobotPickAndPlace
-from core.utils import transform
+from copy import deepcopy
+from math import pi, sin, cos
+import rospy
+# Common interfaces for interacting with both the simulation and real environments!
+from core.interfaces import ArmController
+from core.interfaces import ObjectDetector
+from lib.IK_position_null import IK
+from lib.calculateFK import FK
 
-class PickPlaceDemo:
-    def __init__(self):
-        """Initialize the demo with detection and robot control."""
-        print("\nInitializing Pick and Place Demo...")
-        self.detector = DetectTester()
-        self.robot = RobotPickAndPlace()
+from time import perf_counter
+from scipy.spatial.transform import Rotation
+
+
+# for timing that is consistent with simulation or real time as appropriate
+from core.utils import time_in_seconds
+from core.utils import trans, roll, pitch, yaw, transform
+
+
+
+ik = IK() # IK solver
+fk = FK() 
+
+def swap_elements(element_a, element_b):
+    """
+    Swap two elements by using a temporary variable.
+    
+    Args:
+        element_a: First element to swap
+        element_b: Second element to swap
         
-    def run_demo(self):
-        """Execute the pick and place demo with detection."""
-        print("\nStarting Pick and Place Demo...")
+    Returns:
+        tuple: Swapped elements (b, a)
+    """
+    temp = element_a
+    a = element_b
+    b = temp
+    return a, b
+
+def adjust_rotation_matrix(rotation_matrix, tolerance):
+    """
+    Adjust rotation matrix to align Z-axis closer to [0,0,1] within given tolerance.
+    
+    Args:
+        rotation_matrix: 3x3 rotation matrix to adjust
+        tolerance: Acceptable error range for alignment
         
-        # 1. Detect blocks
-        print("\nDetecting blocks...")
-        blocks = self.detector.test_detect()
-        
-        if not blocks:
-            print("No blocks detected! Aborting demo.")
-            return False
+    Returns:
+        ndarray: Adjusted 3x3 rotation matrix
+    """
+    z_column_idx = None
+    for i in range(3):
+        if np.abs(abs(rotation_matrix[2,i])-1) < tolerance:
+            z_column_idx = i
+
+    if z_column_idx is not None:
+        for i in range(3):
+            rotation_matrix[i,2], rotation_matrix[i,z_column_idx] = swap_elements(
+                rotation_matrix[i,2], rotation_matrix[i,z_column_idx])
+
+    if rotation_matrix[0,0]*rotation_matrix[1,1] < 0:
+        for i in range(3):
+            rotation_matrix[i,0], rotation_matrix[i,1] = swap_elements(
+                rotation_matrix[i,0], rotation_matrix[i,1])
+
+    return rotation_matrix
+
+
+def detect_static_blocks_enhanced(detector, T_CW, num_samples=5, detection_threshold=0.8):
+    """Block detection with temporal filtering and outlier rejection."""
+    all_detections = []
+    valid_blocks = {}
+    
+    # Collect multiple samples
+    for _ in range(num_samples):
+        current_detections = []
+        for block, position in detector.get_detections():
+            # Ensure position is a 4x4 transformation matrix
+            if isinstance(position, np.ndarray) and position.shape == (4, 4):
+                # Transform position to world frame
+                world_pos = T_CW @ position
+                current_detections.append({
+                    'id': block,
+                    'pose': world_pos,
+                    'position': world_pos[:3, 3]  # Extract position vector
+                })
+        all_detections.append(current_detections)
+        rospy.sleep(0.1)
+    
+    # Process and filter detections
+    for sample in all_detections:
+        for block in sample:
+            block_id = block['id']
+            if block_id not in valid_blocks:
+                valid_blocks[block_id] = []
+            valid_blocks[block_id].append(block['position'])
+    
+    filtered_blocks = []
+    for block_id, positions in valid_blocks.items():
+        if len(positions) >= num_samples * detection_threshold:
+            positions = np.array(positions)
+            median_pos = np.median(positions, axis=0)
+            final_position = median_pos  # Use median instead of mean for robustness
+            filtered_blocks.append({
+                'id': block_id,
+                'position': final_position,
+                'confidence': len(positions) / num_samples
+            })
+    
+    return sorted(filtered_blocks, key=lambda x: x['confidence'], reverse=True)
+
+def move_to_target_pose(arm, target_pose, seed, ik_solver):
+    """Helper function to move to a target pose using IK."""
+    joints, _, success, _ = ik_solver.inverse(
+        target=target_pose,
+        seed=seed,
+        method='J_pseudo',
+        alpha=0.5
+    )
+    
+    if success:
+        arm.safe_move_to_position(joints)
+        return joints, True
+    return None, False
+
+def check_grasp_success(arm):
+    """Check if grasp was successful by analyzing gripper state."""
+    gripper_state = arm.get_gripper_state()
+    gripper_pos = gripper_state["position"]
+    
+    # If it's a list/array, convert to scalar
+    if isinstance(gripper_pos, (list, np.ndarray)):
+        gripper_pos = np.mean(gripper_pos)
+    
+    print(f"Gripper position: {gripper_pos}")
+    return gripper_pos >= 0.01
+
+def pick_and_place_static_blocks_enhanced(arm, blocks, place_target):
+    stack_height = place_target[2]
+    current_joints = arm.get_positions()  # Get current joint positions for IK seed
+    
+    for block in blocks:
+        # Pre-grasp
+        pre_grasp = transform(
+            np.array([block['position'][0], block['position'][1], block['position'][2] + 0.15]),
+            np.array([0, pi, pi])
+        )
+        pre_grasp_joints, _, success, _ = ik.inverse(pre_grasp, current_joints, method='J_pseudo', alpha=0.5)
+        if not success:
+            print("Failed to plan pre-grasp")
+            continue
             
-        # 2. Process detected blocks
-        for block in blocks:
-            try:
-                # Extract pick position from detection
-                pick_pos = block['position']
-                
-                # Define place position (offset from pick position)
-                # Adjust these values based on your setup
-                place_pos = np.array([
-                    pick_pos[0] + 0.2,  # 20cm offset in x
-                    pick_pos[1],        # same y
-                    pick_pos[0]         # same z
-                ])
-                
-                print(f"\nAttempting to pick block at position: {pick_pos}")
-                print(f"Planning to place at position: {place_pos}")
-                
-                # Execute pick and place
-                success = self.robot.execute_pick_and_place(pick_pos, place_pos)
-                
-                if success:
-                    print(f"Successfully picked and placed block!")
-                    
-                    # Verify grasp
-                    if self.detector.confirm_pick():
-                        print("Grasp confirmed by gripper sensors")
-                    else:
-                        print("Warning: Grasp may have failed according to gripper sensors")
-                else:
-                    print("Failed to complete pick and place operation")
-                    
-            except Exception as e:
-                print(f"Error during pick and place: {str(e)}")
-                continue
-                
-        return True
+        arm.safe_move_to_position(pre_grasp_joints)
+        arm.open_gripper()
+        rospy.sleep(0.2)
+        
+        # Grasp
+        grasp = transform(
+            np.array([block['position'][0], block['position'][1], block['position'][2] + 0.01]),
+            np.array([0, pi, pi])
+        )
+        grasp_joints, _, success, _ = ik.inverse(grasp, pre_grasp_joints, method='J_pseudo', alpha=0.5)
+        if not success:
+            print("Failed to plan grasp")
+            continue
+            
+        arm.safe_move_to_position(grasp_joints)
+        arm.exec_gripper_cmd(0.045, 100)
+        rospy.sleep(0.5)
+        
+        gripper_position = np.linalg.norm(arm.get_gripper_state()["position"])
+        print(f"Gripper position after grasp: {gripper_position}")
+        
+        if gripper_position < 0.01:
+            recovery = transform(np.array([0.50, -0.2, 0.6]), np.array([0, pi, pi]))
+            recovery_joints, _, success, _ = ik.inverse(recovery, grasp_joints, method='J_pseudo', alpha=0.5)
+            if success:
+                arm.safe_move_to_position(recovery_joints)
+            continue
+        
+        # Lift
+        lift = transform(
+            np.array([block['position'][0], block['position'][1], block['position'][2] + 0.15]),
+            np.array([0, pi, pi])
+        )
+        lift_joints, _, success, _ = ik.inverse(lift, grasp_joints, method='J_pseudo', alpha=0.5)
+        if success:
+            arm.safe_move_to_position(lift_joints)
+            rospy.sleep(0.2)
+        
+        # Place sequence
+        arm.set_arm_speed(0.2)
+        
+        pre_place = transform(
+            np.array([place_target[0], place_target[1], stack_height + 0.1]),
+            np.array([0, pi, pi])
+        )
+        pre_place_joints, _, success, _ = ik.inverse(pre_place, lift_joints, method='J_pseudo', alpha=0.5)
+        if success:
+            arm.safe_move_to_position(pre_place_joints)
+        
+        place = transform(
+            np.array([place_target[0], place_target[1], stack_height + 0.02]),
+            np.array([0, pi, pi])
+        )
+        place_joints, _, success, _ = ik.inverse(place, pre_place_joints, method='J_pseudo', alpha=0.5)
+        if success:
+            arm.safe_move_to_position(place_joints)
+            rospy.sleep(0.2)
+            arm.open_gripper()
+            rospy.sleep(0.3)
+        
+        retreat = transform(
+            np.array([place_target[0], place_target[1], stack_height + 0.15]),
+            np.array([0, pi, pi])
+        )
+        retreat_joints, _, success, _ = ik.inverse(retreat, place_joints, method='J_pseudo', alpha=0.5)
+        if success:
+            arm.safe_move_to_position(retreat_joints)
+        
+        arm.set_arm_speed(0.3)
+        stack_height += 0.05
+        current_joints = retreat_joints
 
 def main():
-    """Main function to run the demo"""
-    rospy.init_node("pick_place_demo")
-    
     try:
-        demo = PickPlaceDemo()
-        success = demo.run_demo()
+        team = rospy.get_param("team")
+    except KeyError:
+        print('Team must be red or blue - make sure you are running final.launch!')
+        exit()
+    rospy.init_node("team_script")
+    arm = ArmController()
+    detector = ObjectDetector()
+    
+    start_position = np.array([-0.01779206, -0.76012354, 0.01978261, -2.34205014, 0.02984053, 1.54119353+pi/2, 0.75344866])
+    arm.safe_move_to_position(start_position)
+    
+    print("\n****************")
+    if team == 'blue':
+        print("** BLUE TEAM  **")
+        target_pose = transform(np.array([0.5, 0.1725, 0.55]), np.array([0, pi, pi]))
+        place_target = np.array([0.55, -0.15, 0.27])
+    else:
+        print("**  RED TEAM  **")
+        target_pose = transform(np.array([0.485, -0.17, 0.55]), np.array([0, pi, pi]))
+        place_target = np.array([0.55, 0.169, 0.27])
+    print("****************")
+    input("\nWaiting for start... Press ENTER to begin!\n")
+    print("Go!\n")
+    
+    # Convert target pose to joint angles using IK
+    observation_joints, _, success, _ = ik.inverse(
+        target=target_pose, 
+        seed=start_position,
+        method='J_pseudo',
+        alpha=0.5
+    )
+    if not success:
+        print("Failed to compute IK for observation pose")
+        return
         
-        if success:
-            print("\nDemo completed successfully!")
-        else:
-            print("\nDemo failed!")
-            
-    except Exception as e:
-        print(f"\nError during demo execution: {str(e)}")
-        
-    print("\nDemo finished.")
+    arm.set_arm_speed(0.3)
+    arm.safe_move_to_position(observation_joints)
+    
+    H_ee_camera = detector.get_H_ee_camera()
+    # Fix: Don't wrap observation_joints in an extra array
+    joints_array = np.array(observation_joints)  # Convert to numpy array
+    _, T_EW = fk.forward(joints_array)  # Forward kinematics
+    T_CW = T_EW @ H_ee_camera  # Camera to world transform
+    
+    block_positions = detect_static_blocks_enhanced(detector, T_CW)
+    if block_positions:
+        pick_and_place_static_blocks_enhanced(arm, block_positions, place_target)
+    else:
+        print("No blocks detected")
 
 if __name__ == "__main__":
     main()
+
