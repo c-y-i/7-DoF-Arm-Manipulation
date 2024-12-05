@@ -8,6 +8,7 @@ from scipy.spatial.transform import Rotation as R
 from math import pi
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from scipy.spatial.transform import Rotation
 
 class DetectVisualTester:
     """Tester class for block detection visualization."""
@@ -16,6 +17,7 @@ class DetectVisualTester:
         self.gripper_width = 0.08  # Increased width
         self.finger_length = 0.05  # Increased length
         self.grip_state = 0
+        self.block_size = 0.05  # 5cm blocks
 
     def test_with_generated_data(self):
         """
@@ -218,6 +220,63 @@ class DetectVisualTester:
         # Position gripper at block
         transform[:3, 3] = block_pos
         return transform
+
+    def plot_block(self, ax, block_data):
+        """Plot a block as a colored cube."""
+        pos = block_data['position']
+        block_size = 0.05  # 5cm blocks
+        color = block_data.get('color', 'blue')  # Use provided color or default to blue
+        
+        # Create cube vertices
+        vertices = np.array([
+            [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
+            [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1]
+        ]) * (block_size/2)
+        
+        # Transform vertices
+        R = Rotation.from_euler('xyz', block_data['orientation']).as_matrix()
+        vertices = (R @ vertices.T).T + pos
+        
+        # Define faces
+        faces = [
+            [vertices[0], vertices[1], vertices[2], vertices[3]],
+            [vertices[4], vertices[5], vertices[6], vertices[7]],
+            [vertices[0], vertices[1], vertices[5], vertices[4]],
+            [vertices[2], vertices[3], vertices[7], vertices[6]],
+            [vertices[1], vertices[2], vertices[6], vertices[5]],
+            [vertices[0], vertices[3], vertices[7], vertices[4]]
+        ]
+        
+        # Plot faces
+        collection = Poly3DCollection(faces, alpha=0.5)
+        collection.set_facecolor(color)
+        ax.add_collection3d(collection)
+
+    def plot_gripper(self, ax, transform, grip_state):
+        """Plot gripper visualization with opening state."""
+        # Gripper dimensions
+        gripper_width = 0.05 * (1 - grip_state)  # Gripper closes as state increases
+        finger_length = 0.08
+        
+        # Base gripper finger positions (in gripper frame)
+        fingers = np.array([
+            [0, gripper_width, 0],     # Right finger
+            [0, -gripper_width, 0],    # Left finger
+            [finger_length, gripper_width, 0],    # Right finger tip
+            [finger_length, -gripper_width, 0],   # Left finger tip
+        ])
+        
+        # Transform fingers to world frame
+        fingers_h = np.hstack([fingers, np.ones((4, 1))])
+        fingers_world = (transform @ fingers_h.T).T[:, :3]
+        
+        # Draw gripper fingers
+        ax.plot([fingers_world[0,0], fingers_world[2,0]], 
+                [fingers_world[0,1], fingers_world[2,1]],
+                [fingers_world[0,2], fingers_world[2,2]], 'r-', linewidth=2)
+        ax.plot([fingers_world[1,0], fingers_world[3,0]], 
+                [fingers_world[1,1], fingers_world[3,1]],
+                [fingers_world[1,2], fingers_world[3,2]], 'r-', linewidth=2)
 
 def main():
     """Main function to test block detection visualization"""

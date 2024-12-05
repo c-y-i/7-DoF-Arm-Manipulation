@@ -17,57 +17,11 @@ from scipy.spatial.transform import Rotation
 from core.utils import time_in_seconds
 from core.utils import trans, roll, pitch, yaw, transform
 
-
-
 ik = IK() # IK solver
 fk = FK() 
 
-def swap_elements(element_a, element_b):
-    """
-    Swap two elements by using a temporary variable.
-    
-    Args:
-        element_a: First element to swap
-        element_b: Second element to swap
-        
-    Returns:
-        tuple: Swapped elements (b, a)
-    """
-    temp = element_a
-    a = element_b
-    b = temp
-    return a, b
 
-def adjust_rotation_matrix(rotation_matrix, tolerance):
-    """
-    Adjust rotation matrix to align Z-axis closer to [0,0,1] within given tolerance.
-    
-    Args:
-        rotation_matrix: 3x3 rotation matrix to adjust
-        tolerance: Acceptable error range for alignment
-        
-    Returns:
-        ndarray: Adjusted 3x3 rotation matrix
-    """
-    z_column_idx = None
-    for i in range(3):
-        if np.abs(abs(rotation_matrix[2,i])-1) < tolerance:
-            z_column_idx = i
-
-    if z_column_idx is not None:
-        for i in range(3):
-            rotation_matrix[i,2], rotation_matrix[i,z_column_idx] = swap_elements(
-                rotation_matrix[i,2], rotation_matrix[i,z_column_idx])
-
-    if rotation_matrix[0,0]*rotation_matrix[1,1] < 0:
-        for i in range(3):
-            rotation_matrix[i,0], rotation_matrix[i,1] = swap_elements(
-                rotation_matrix[i,0], rotation_matrix[i,1])
-
-    return rotation_matrix
-
-
-def detect_static_blocks_enhanced(detector, T_CW, num_samples=5, detection_threshold=0.8):
+def detect_static(detector, T_CW, num_samples=5, detection_threshold=0.8):
     """Block detection with temporal filtering and outlier rejection."""
     all_detections = []
     valid_blocks = {}
@@ -136,7 +90,7 @@ def check_grasp_success(arm):
     print(f"Gripper position: {gripper_pos}")
     return gripper_pos >= 0.01
 
-def pick_and_place_static_blocks_enhanced(arm, blocks, place_target):
+def pick_place_static(arm, blocks, place_target):
     stack_height = place_target[2]
     current_joints = arm.get_positions()  # Get current joint positions for IK seed
     
@@ -201,7 +155,7 @@ def pick_and_place_static_blocks_enhanced(arm, blocks, place_target):
             arm.safe_move_to_position(pre_place_joints)
         
         place = transform(
-            np.array([place_target[0], place_target[1], stack_height + 0.02]),
+            np.array([place_target[0], place_target[1], stack_height - 0.025]),
             np.array([0, pi, pi])
         )
         place_joints, _, success, _ = ik.inverse(place, pre_place_joints, method='J_pseudo', alpha=0.5)
@@ -240,7 +194,7 @@ def main():
     if team == 'blue':
         print("** BLUE TEAM  **")
         target_pose = transform(np.array([0.5, 0.1725, 0.55]), np.array([0, pi, pi]))
-        place_target = np.array([0.55, -0.15, 0.27])
+        place_target = np.array([0.56, -0.155, 0.275])
     else:
         print("**  RED TEAM  **")
         target_pose = transform(np.array([0.485, -0.17, 0.55]), np.array([0, pi, pi]))
@@ -269,9 +223,9 @@ def main():
     _, T_EW = fk.forward(joints_array)  # Forward kinematics
     T_CW = T_EW @ H_ee_camera  # Camera to world transform
     
-    block_positions = detect_static_blocks_enhanced(detector, T_CW)
+    block_positions = detect_static(detector, T_CW)
     if block_positions:
-        pick_and_place_static_blocks_enhanced(arm, block_positions, place_target)
+        pick_place_static(arm, block_positions, place_target)
     else:
         print("No blocks detected")
 

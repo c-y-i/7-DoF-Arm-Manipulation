@@ -20,30 +20,62 @@ from lib.IK_position_null import IK
 from math import pi
 import time
 from detect_visual import DetectVisualTester 
+from scipy.spatial.transform import Rotation
+from matplotlib.animation import PillowWriter
 
 
 class VisualTester:
-    def __init__(self, pick_pos, place_pos, save_animation=False):
-        """Initialize visualizer with pick and place positions."""
-        self.visualizer = DetectVisualTester()  # Initialize once for block visualization
+    def __init__(self, blocks_data, place_pos, save_animation=False):
+        """Initialize visualizer with blocks data and place positions."""
+        self.visualizer = DetectVisualTester()
         self.save_animation = save_animation
         print(f"\nInitializing Visual Tester...")
         self.arm = MockArmController()
         self.fk = FK()
         self.ik = IK(linear_tol=1e-3, angular_tol=1e-2, max_steps=200)
-        self.pick_pos = pick_pos
-        self.place_pos = place_pos
-        self.create_trajectory()
+        self.blocks_data = blocks_data
+        self.blocks_state = {block['id']: {
+            'position': block['position'].copy(),
+            'orientation': block['orientation'].copy(),
+            'picked': False,
+            'placed': False,
+            'current_height': 0.05,  # Add initial height
+            'original_position': block['position'].copy()  # Store original position
+        } for block in blocks_data}
+        self.current_block_id = blocks_data[0]['id']
+        self.pick_pos = None  # Change this line to initialize as None
+        self.place_pos = place_pos.copy()  # Make sure to copy place_pos
+        self.trajectories = {}  # Store trajectories for all blocks
+        self.joint_angles_all = {}  # Store joint angles for all blocks
+        self.trajectory_colors = {  # Add colors for each trajectory
+            'block_0': 'blue',
+            'block_1': 'green',
+            'block_2': 'red',
+            'block_3': 'purple'
+        }
+        self.frame_count = 0  # Total frames across all trajectories
         self.fig = plt.figure(figsize=(10, 10))
         self.ax = self.fig.add_subplot(111, projection='3d')
         self.setup_plot()
         self.frame_idx = 0
         self.is_picking = False
         self.block_picked = False
+        self.blocks_being_moved = set()  # Add this to track which blocks are moving
         self.grip_state = 0  # Add grip state tracking
         self.grip_angle = 0  # Add grip angle tracking
         self.animation_complete = False
         self.final_positions = None  # Store final positions for alignment plot
+        self.grasp_success = False
+        self.stack_height = self.place_pos[2]
+        self.block_colors = {  # Add block colors
+            'block_0': 'blue',
+            'block_1': 'green',
+            'block_2': 'red',
+            'block_3': 'purple'
+        }
+        self.current_trajectory = None  # Add this line
+        self.current_joints = None      # Add this line
+        self.active_trajectory_segment = None  # Add this line to track current segment
         print("Visual Tester initialized successfully.")
         
     def create_trajectory(self):
@@ -53,20 +85,21 @@ class VisualTester:
         print("\nGenerating trajectory...")
         start_pos = np.array([0.3, 0, 0.5])
         
-        z_offset = 0.3
+        z_offset = 0.15  # Reduced from 0.3 to match pick_place_demo
         wp1 = start_pos
-        wp2 = self.pick_pos + np.array([0, 0, z_offset])  
-        wp3 = self.pick_pos  
-        wp4 = self.pick_pos + np.array([0, 0, z_offset])
-        wp5 = self.place_pos + np.array([0, 0, z_offset])
-        wp6 = self.place_pos
-        self.waypoints = np.vstack([wp1, wp2, wp3, wp4, wp5, wp6])
+        wp2 = self.pick_pos + np.array([0, 0, z_offset])  # Pre-grasp
+        wp3 = self.pick_pos + np.array([0, 0, 0.01])      # Grasp
+        wp4 = self.pick_pos + np.array([0, 0, z_offset])  # Post-grasp lift
+        wp5 = self.place_pos + np.array([0, 0, z_offset]) # Pre-place
+        wp6 = self.place_pos + np.array([0, 0, 0.02])     # Place
+        wp7 = self.place_pos + np.array([0, 0, z_offset]) # Retreat
+        self.waypoints = np.vstack([wp1, wp2, wp3, wp4, wp5, wp6, wp7])
         print(f"Generated {len(self.waypoints)} waypoints")
         self.trajectory = []
         points_between = 10
         target = np.eye(4)
         target[:3,3] = self.waypoints[0]
-        target[:3,:3] = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]])
+        target[:3,:3] = Rotation.from_euler('xyz', [0, pi, pi]).as_matrix()
         initial_seeds = [
             np.array([0, 0, 0, -pi/2, 0, pi/2, pi/4]),
             np.array([0, -pi/4, 0, -3*pi/4, 0, pi/2, pi/4]),
@@ -106,6 +139,45 @@ class VisualTester:
         self.joint_angles = np.array(self.joint_angles)
         print(f"\nTrajectory generated with {len(self.trajectory)} points")
         
+    def create_all_trajectories(self):
+        """Generate trajectories for all blocks at initialization."""
+        print("\nGenerating trajectories for all blocks...")
+        current_height = self.place_pos[2]
+        
+        # Store original place position
+        original_place_pos = self.place_pos.copy()
+        
+        for block_id, block_state in self.blocks_state.items():
+            print(f"\nGenerating trajectory for {block_id}...")
+            self.pick_pos = block_state['position'].copy()  # Set pick position
+            temp_place = self.place_pos.copy()
+            temp_place[2] = current_height
+            self.place_pos = temp_place
+            
+            # Store the target height for this block
+            block_state['current_height'] = current_height
+            
+            # Generate trajectory for this block
+            self.create_trajectory()
+            self.trajectories[block_id] = self.trajectory.copy()
+            self.joint_angles_all[block_id] = self.joint_angles.copy()
+            
+            # Update height for next block
+            current_height += 0.05
+            
+        # Restore original place position
+        self.place_pos = original_place_pos
+        
+        # Calculate total frames
+        self.frame_count = sum(len(traj) for traj in self.trajectories.values())
+        print(f"\nGenerated {len(self.trajectories)} trajectories with total {self.frame_count} frames")
+
+    def generate_single_trajectory(self):
+        """Generate trajectory for a single block."""
+        # Move existing trajectory generation code here
+        # ...copy existing create_trajectory() code here...
+        return self.trajectory, self.joint_angles
+
     def setup_plot(self):
         self.ax.set_xlabel('X')
         self.ax.set_ylabel('Y')
@@ -114,11 +186,11 @@ class VisualTester:
         self.ax.set_ylim([-0.5, 0.5])
         self.ax.set_zlim([0, 0.7])
         self.ax.set_title('MEAM 5200 Final Project\nPick Logic Tester (Visualization)', 
-                         pad=20, fontsize=12, fontweight='bold')
+                         pad=20, fontsize=14, fontweight='bold')
         self.fig.text(0.02, 0.98, 'MEAM 5200 - Team 16', 
-                     fontsize=8, transform=self.fig.transFigure)
+                     fontsize=12, transform=self.fig.transFigure)
         self.fig.text(0.02, 0.96, 'Fall 2024', 
-                     fontsize=8, transform=self.fig.transFigure)
+                     fontsize=12, transform=self.fig.transFigure)
         
     def plot_robot_arm(self, joint_angles):
         """
@@ -143,9 +215,11 @@ class VisualTester:
                     self.trajectory[:,2], 'g--', alpha=0.5, label='Planned Path')
     
     def plot_blocks(self):
-        """Visualize pick and place positions in the 3D space."""
-        self.ax.scatter([self.pick_pos[0]], [self.pick_pos[1]], [self.pick_pos[2]], 
-                       color='blue', s=100, label='Pick Position')
+        """Visualize all blocks in the 3D space."""
+        for block in self.blocks_data:
+            pos = block['position']
+            self.ax.scatter([pos[0]], [pos[1]], [pos[2]], 
+                          color='blue', s=100)
         self.ax.scatter([self.place_pos[0]], [self.place_pos[1]], [self.place_pos[2]], 
                        color='green', s=100, label='Place Position')
     
@@ -153,46 +227,85 @@ class VisualTester:
         """Update the visualization for each animation frame."""
         self.ax.clear()
         self.setup_plot()
-        current_joints = self.joint_angles[frame]
-        positions, T = self.fk.forward(current_joints)
-        self.plot_robot_arm(current_joints)
-        self.plot_trajectory()
         
-        # Update grip state based on proximity to block
-        if self.is_near_pick_position(frame):
-            self.grip_state = min(1.0, self.grip_state + 0.2)  # Faster closing
+        # Find current block and frame
+        total_frames = 0
+        current_frame = 0
+        for block_id, trajectory in self.trajectories.items():
+            if frame < total_frames + len(trajectory):
+                self.current_block_id = block_id
+                current_frame = frame - total_frames
+                self.current_trajectory = trajectory
+                self.current_joints = self.joint_angles_all[block_id]
+                break
+            total_frames += len(trajectory)
         
-        # Create proper gripper transform
+        # Get current position and joint angles
+        current_pos = self.current_trajectory[current_frame]
+        current_joint_angles = self.current_joints[current_frame]
+        positions, _ = self.fk.forward(current_joint_angles)
+        
+        # Update grip state based on height difference
+        height_diff = current_pos[2] - self.blocks_state[self.current_block_id]['original_position'][2]
+        if abs(height_diff) < 0.03:  # Close to pick height
+            self.grip_state = min(1.0, self.grip_state + 0.2)
+            if self.grip_state >= 1.0:
+                self.blocks_state[self.current_block_id]['picked'] = True
+        elif height_diff > 0.1:  # Moving up with block
+            self.grip_state = 1.0
+        
+        # Update block positions
+        for block_id, block_state in self.blocks_state.items():
+            if block_id == self.current_block_id:
+                if block_state['picked'] and not block_state['placed']:
+                    # Move block with end effector
+                    block_state['position'] = positions[-1] - np.array([0, 0, 0.03])
+                elif not block_state['picked']:
+                    # Keep at original position
+                    block_state['position'] = block_state['original_position']
+            
+            # Draw block
+            self.visualizer.plot_block(self.ax, {
+                'id': block_id,
+                'position': block_state['position'],
+                'orientation': block_state['orientation']
+            })
+        
+        # Plot robot arm and trajectories
+        self.plot_robot_arm(current_joint_angles)
+        
+        # Plot current trajectory more prominently
+        for block_id, trajectory in self.trajectories.items():
+            color = self.trajectory_colors[block_id]
+            if block_id == self.current_block_id:
+                # Plot completed path
+                if current_frame > 0:
+                    self.ax.plot(trajectory[:current_frame,0], 
+                               trajectory[:current_frame,1], 
+                               trajectory[:current_frame,2], 
+                               color=color, alpha=0.8, linewidth=2)
+                # Plot future path
+                if current_frame < len(trajectory):
+                    self.ax.plot(trajectory[current_frame:,0], 
+                               trajectory[current_frame:,1], 
+                               trajectory[current_frame:,2], 
+                               '--', color=color, alpha=0.3)
+            else:
+                self.ax.plot(trajectory[:,0], trajectory[:,1], trajectory[:,2], 
+                           '--', color=color, alpha=0.2)
+        
+        # Update gripper
         gripper_transform = np.eye(4)
-        gripper_transform[:3, :3] = np.array([[0, -1, 0],
-                                            [1, 0, 0],
-                                            [0, 0, 1]])  # Align gripper with block
-        gripper_transform[:3, 3] = positions[-1]  # End effector position
-        
-        # Create block data
-        block_pos = self.pick_pos if not self.block_picked else positions[-1]
-        block_data = {
-            'id': 'Pick Block',
-            'position': block_pos,
-            'orientation': np.zeros(3),
-            'transform': np.eye(4)
-        }
-        block_data['transform'][:3, 3] = block_pos
-        
-        # Visualize block and gripper
-        try:
-            self.visualizer.plot_grip_sequence(self.ax, block_data, gripper_transform, self.grip_state)
-        except Exception as e:
-            print(f"Visualization error: {e}")
+        gripper_transform[:3, :3] = Rotation.from_euler('xyz', [0, pi, 0]).as_matrix()
+        gripper_transform[:3, 3] = positions[-1]
+        self.visualizer.plot_gripper(self.ax, gripper_transform, self.grip_state)
         
         # Show place position
         self.ax.scatter([self.place_pos[0]], [self.place_pos[1]], [self.place_pos[2]], 
                        color='green', s=100, label='Place Position')
         
         self.ax.legend()
-        
-        # Update frame counter
-        self.frame_idx = frame
+        return self.ax  # Return the axes for proper animation
 
     def is_near_pick_position(self, idx):
         """Check if the current position is near the pick position."""
@@ -206,6 +319,18 @@ class VisualTester:
             if distance < 0.01:  # Very close to pick position
                 self.block_picked = True
         return self.is_picking
+
+    def check_grasp_success(self, frame):
+        """Simulate grasp success check based on proximity and timing."""
+        if not self.grasp_success:
+            # Check if we're at the grasp position (wp3)
+            current_pos = self.trajectory[frame]
+            distance_to_pick = np.linalg.norm(current_pos - self.pick_pos)
+            if distance_to_pick < 0.02:  # If very close to pick position
+                self.grasp_success = True
+                self.grip_state = 1.0  # Close gripper
+                print("Grasp successful!")
+        return self.grasp_success
 
     def plot_final_alignment(self):
         """Plot 2D visualization of final gripper-block alignment."""
@@ -286,48 +411,44 @@ class VisualTester:
         alignment_error = np.abs(fingers_world[0, 1] - fingers_world[1, 1])
         fig.suptitle(f'Gripper Alignment (Error: {alignment_error:.3f}m)', y=1.05)
         
+        # Add grasp success indicator
+        if self.grasp_success:
+            fig.text(0.02, 0.94, 'Grasp: SUCCESS', 
+                    color='green', fontsize=10, transform=fig.transFigure)
+        else:
+            fig.text(0.02, 0.94, 'Grasp: FAILED', 
+                    color='red', fontsize=10, transform=fig.transFigure)
+        
         plt.show()
 
         
     def run(self):
         """
-        Execute the visualization and optionally save as GIF.
-
-        Handles both real-time display and animation saving functionality.
+        Execute visualization for all blocks sequentially.
         """
-        ani = FuncAnimation(self.fig, self.update, frames=len(self.trajectory),
-                            interval=50, repeat=False, blit=False)  # Disable blit for proper updates
+        self.create_all_trajectories()
         
-        # Store final positions for alignment plot
-        final_frame = len(self.trajectory) - 1
-        positions, T = self.fk.forward(self.joint_angles[final_frame])
-        self.final_positions = (positions, T)
+        # Create animation with proper frame handling
+        ani = FuncAnimation(
+            self.fig, 
+            self.update,
+            frames=self.frame_count,
+            interval=50,  # Slower for smoother animation
+            blit=False,
+            repeat=False
+        )
         
         if self.save_animation:
             print("\nSaving animation as GIF...")
-            if not os.path.exists('media'):
-                os.makedirs('media')
-            frames = []
-            for frame in range(len(self.trajectory)):
-                self.update(frame)
-                fig_canvas = self.fig.canvas
-                fig_canvas.draw()
-                frame_data = np.frombuffer(fig_canvas.tostring_rgb(), dtype=np.uint8)
-                frame_data = frame_data.reshape(fig_canvas.get_width_height()[::-1] + (3,))
-                frames.append(Image.fromarray(frame_data))
-            filename = f'media/pick_place_{time.strftime("%Y%m%d_%H%M%S")}.gif'
-            frames[0].save(
-                filename,
-                save_all=True,
-                append_images=frames[1:],
-                duration=50,
-                loop=0
+            ani.save(
+                "media/pick_place_visualization.gif",
+                writer='pillow',
+                fps=20,
+                progress_callback=lambda i, n: print(f'Saving frame {i} of {n}')
             )
-            print(f"Animation saved as: {filename}")
-        plt.show(block=True)  # Ensure animation completes
+            print("Animation saved successfully!")
         
-        # After animation completes, show alignment plot
-        self.plot_final_alignment()
+        plt.show()
 
 def main():
     """
@@ -336,51 +457,28 @@ def main():
     """
     print("\n=== Pick and Place Visualization Testing ===")
     
-    # Platform specifications (scaled for visualization)
-    scale_factor = 0.4  # Scale factor to bring positions into workspace
-    platform_height = 0.23 * scale_factor
-    platform_center_x = 0.562 * scale_factor
-    platform_center_y = 1.159 * scale_factor
-    block_size = 0.05  # 50mm blocks
-    noise_radius = 0.025 * scale_factor
+    # Define block positions in a square pattern
+    block_positions = [
+        {'pos': [0.3, 0.3], 'orient': [0, pi, 0]},
+        {'pos': [0.3, -0.3], 'orient': [0, pi, pi/4]},
+        {'pos': [-0.3, 0.3], 'orient': [0, pi, -pi/4]},
+        {'pos': [-0.3, -0.3], 'orient': [0, pi, pi/2]}
+    ]
     
-    def noise(radius):
-        return float(radius * (np.random.rand() - 0.5))
+    blocks_data = []
+    for i, pos in enumerate(block_positions):
+        blocks_data.append({
+            'id': f'block_{i}',
+            'position': np.array([pos['pos'][0], pos['pos'][1], 0.05]),
+            'orientation': np.array(pos['orient'])
+        })
     
-    def generate_static_position():
-        # Generate position following block_spawner logic but scaled
-        i = np.random.choice([-1, 1])
-        j = np.random.choice([-1, 1])
-        x = platform_center_x + 2.5*0.0254 * i
-        y = platform_center_y + 2.5*0.0254 * j
-        
-        # Transform to robot frame and scale
-        pos = np.array([
-            x + noise(noise_radius),
-            y + noise(noise_radius),
-            platform_height
-        ], dtype=float)
-        
-        # Optional: Add position validation
-        if np.linalg.norm(pos[:2]) > 0.4:  # If position is too far
-            pos[:2] = pos[:2] * 0.4 / np.linalg.norm(pos[:2])  # Scale back to reasonable range
-            
-        return pos
-
-    print("\nGenerating positions following competition specifications...")
-    pick_pos = generate_static_position()
-    place_pos = generate_static_position()
+    # Place position (stack blocks at this location)
+    place_pos = np.array([0.4, 0, 0.05])
     
-    # Ensure pick and place positions are different but not too far
-    while 0.05 > np.linalg.norm(pick_pos - place_pos) or np.linalg.norm(pick_pos - place_pos) > 0.3:
-        place_pos = generate_static_position()
-        
-    print(f"Pick position:  {pick_pos}")
-    print(f"Place position: {place_pos}")
     print("\nStarting visualization...")
-    save_animation = True
-    
-    visualizer = VisualTester(pick_pos, place_pos, save_animation=save_animation)
+    # Change this line to enable animation saving:
+    visualizer = VisualTester(blocks_data, place_pos, save_animation=True)
     visualizer.run()
 
 if __name__ == "__main__":
