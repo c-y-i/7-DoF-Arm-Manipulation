@@ -19,9 +19,21 @@ from core.utils import trans, roll, pitch, yaw, transform
 ik = IK() # IK solver
 fk = FK()
 
-# Set parameters for dynamic block interception
-omega = 0.5  # example angular velocity of turntable in rad/s
-theta_pick = 0.0  # pick angle along x-axis
+##################################
+# Adjustable parameters
+##################################
+# Dynamic observation pose in Cartesian space.
+# Position (x, y, z) and orientation (roll, pitch, yaw).
+# Tune these so the camera looks down onto the dynamic turntable at the origin.
+dynamic_observation_position = np.array([0.0, 0.0, 0.7])
+dynamic_observation_orientation = np.array([0, pi, pi])  # facing downward
+
+# Angular velocity of the turntable (rad/s)
+omega = 0.5
+
+# Desired pick angle for dynamic interception (e.g., 0.0 = along x-axis)
+theta_pick = 0.0
+
 
 def filter_block_detections(all_detections, num_samples=5, detection_threshold=0.8):
     """
@@ -176,6 +188,7 @@ def pick_place_static(arm, blocks, place_target):
         stack_height += 0.05
         current_joints = retreat_joints
 
+
 #############################
 ## Dynamic Block Functions ##
 #############################
@@ -220,14 +233,24 @@ def orientation_to_rpy(R):
 def pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=0.0, R=0.305, z=0.200):
     """
     Attempt to pick a dynamic block off the rotating turntable.
+    Move the arm to a dynamic observation pose (using IK) before detecting dynamic blocks.
     """
-    # Move arm to observation position to see dynamic blocks
-    observation_joints = np.array([-0.01779206, -0.76012354, 0.01978261, -2.34205014, 
-                                   0.02984053, 1.54119353+pi/2, 0.75344866])
-    arm.safe_move_to_position(observation_joints)
+    # Compute desired dynamic observation transform
+    dynamic_observation_pose = transform(dynamic_observation_position, dynamic_observation_orientation)
+    
+    # Current arm state as seed
+    current_joints = arm.get_positions()
+    # Move arm to dynamic observation position via IK
+    obs_joints, success = None, False
+    obs_joints, _, success, _ = ik.inverse(dynamic_observation_pose, current_joints, method='J_pseudo', alpha=0.5)
+    if not success:
+        print("Failed to compute IK for dynamic observation position.")
+        return
+    arm.safe_move_to_position(obs_joints)
 
+    # Compute camera transform at this observation position
+    _, T_EW = fk.forward(obs_joints)
     H_ee_camera = detector.get_H_ee_camera()
-    _, T_EW = fk.forward(observation_joints)
     T_CW = T_EW @ H_ee_camera
 
     # Detect dynamic blocks
@@ -371,7 +394,9 @@ def main():
     else:
         print("No blocks detected (static)")
     
+    # Attempt to pick a dynamic block now using IK to reach the observation pose
     pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=theta_pick)
+
 
 if __name__ == "__main__":
     main()

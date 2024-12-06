@@ -3,7 +3,19 @@ from math import pi, atan2, sin, cos
 
 def compute_dynamic_intercept(block_position, block_orientation, t_now, omega, theta_pick, R=0.305, z=0.200):
     """
-    Compute intercept time and predicted pose for a dynamic block on a rotating turntable.
+    Compute the intercept time and predicted pose for a dynamic block on a rotating turntable.
+    block_position: current [x, y, z]
+    block_orientation: 3x3 rotation matrix for block orientation
+    t_now: current time (seconds)
+    omega: angular velocity (rad/s) of turntable
+    theta_pick: angle at which we want to pick the block
+    R: radius of turntable
+    z: height of turntable surface
+
+    Returns:
+    - t_intercept: time in seconds until block reaches theta_pick
+    - intercept_pos: [x, y, z] of block at intercept time
+    - intercept_orientation: 3x3 rotation matrix of block at intercept time
     """
     x, y, _ = block_position
     theta_now = atan2(y, x)
@@ -31,7 +43,9 @@ def compute_dynamic_intercept(block_position, block_orientation, t_now, omega, t
 
 def orientation_to_rpy(R):
     """
-    Convert rotation matrix to roll, pitch, yaw.
+    Convert rotation matrix R to roll, pitch, yaw.
+    R: 3x3 rotation matrix
+    Returns (roll, pitch, yaw)
     """
     yaw = np.arctan2(R[1,0], R[0,0])
     pitch = np.arctan2(-R[2,0], np.sqrt(R[2,1]**2 + R[2,2]**2))
