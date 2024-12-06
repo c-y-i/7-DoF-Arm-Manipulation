@@ -14,7 +14,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation
 from PIL import Image
 import os
-from manager import MockArmController
+from mock import MockArmController
 from lib.calculateFK import FK
 from lib.IK_position_null import IK
 from math import pi

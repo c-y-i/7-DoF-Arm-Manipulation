@@ -1,177 +1,274 @@
-"""
-Pick logic library for the robot arm.
-Author: Team 16
-"""
-
+import sys
 import numpy as np
+from copy import deepcopy
 from math import pi
-from scipy.spatial.transform import Rotation as R
-from time import sleep
+import rospy
 
-class StaticBlockHandler:
-    def __init__(self, fk_solver, ik_solver):
-        """Initialize with FK and IK solvers from the main script.""" 
-        self.fk_solver = fk_solver
-        self.ik_solver = ik_solver
+# Robot interfaces
+from core.interfaces import ArmController
+from core.interfaces import ObjectDetector
+from lib.IK_position_null import IK
+from lib.calculateFK import FK
 
-    def plan_observation_pose(self):
-        """Calculate observation pose.""" 
-        obs_position = np.array([0.5, -0.1, 0.5])
-        obs_orientation = R.from_euler('xyz', [pi, 0, 0]).as_matrix()
-        
-        obs_pose = np.eye(4)
-        obs_pose[:3, :3] = obs_orientation
-        obs_pose[:3, 3] = obs_position
-        
-        return obs_pose
+# Utilities
+from core.utils import time_in_seconds, transform
 
-    def transform_to_base_frame(self, position, current_joints, H_ee_camera):
-        """Transform position from camera frame to robot base frame.""" 
-        T_EE_C = H_ee_camera
-        _, T_BASE_EE = self.fk_solver.forward([current_joints])
-        T_BASE_C = T_BASE_EE[-1] @ T_EE_C
-        position_homogeneous = np.append(position, 1)
-        base_position = T_BASE_C @ position_homogeneous
-        return base_position[:3]
+import lib.static as static
+import lib.dynamic as dynamic
 
-    def plan_block_pickup(self, block_pose, seed_joints):
-        """Plan the sequence of poses for picking up a block.""" 
-        desired_orientation = R.from_euler('xyz', [pi, 0, 0]).as_matrix()
-        
-        adjusted_position = np.copy(block_pose)
-        adjusted_position[2] = max(adjusted_position[2], 0.05)
-        
-        pre_grasp_position = adjusted_position + np.array([0, 0, 0.1])
-        pre_grasp_pose = np.eye(4)
-        pre_grasp_pose[:3, :3] = desired_orientation
-        pre_grasp_pose[:3, 3] = pre_grasp_position
-        
-        grasp_position = adjusted_position + np.array([0, 0, 0.015])
-        grasp_pose = np.eye(4)
-        grasp_pose[:3, :3] = desired_orientation
-        grasp_pose[:3, 3] = grasp_position
-        
-        pre_grasp_joints, _, pre_success, _ = self.ik_solver.inverse(
-            pre_grasp_pose, seed_joints, method='J_pseudo', alpha=0.1)
-        grasp_joints, _, grasp_success, _ = self.ik_solver.inverse(
-            grasp_pose, pre_grasp_joints if pre_success else seed_joints, 
-            method='J_pseudo', alpha=0.1)
-        
-        return {
-            'pre_grasp_pose': pre_grasp_pose,
-            'grasp_pose': grasp_pose,
-            'pre_grasp_joints': pre_grasp_joints if pre_success else None,
-            'grasp_joints': grasp_joints if grasp_success else None,
-            'success': pre_success and grasp_success
-        }
+ik = IK()
+fk = FK()
 
-    def plan_block_placement(self, place_position, seed_joints):
-        """Plan the sequence of poses for placing a block.""" 
-        desired_orientation = R.from_euler('xyz', [pi, 0, 0]).as_matrix()
-        
-        # Pre-place pose
-        pre_place_position = place_position + np.array([0, 0, 0.1])
-        pre_place_pose = np.eye(4)
-        pre_place_pose[:3, :3] = desired_orientation
-        pre_place_pose[:3, 3] = pre_place_position
-        
-        # Place pose
-        place_pose = np.eye(4)
-        place_pose[:3, :3] = desired_orientation
-        place_pose[:3, 3] = place_position + np.array([0, 0, 0.02])
-        
-        # Calculate joint angles for each pose
-        pre_place_joints, _, pre_success, _ = self.ik_solver.inverse(
-            pre_place_pose, seed_joints, method='J_pseudo', alpha=0.1)
-        place_joints, _, place_success, _ = self.ik_solver.inverse(
-            place_pose, pre_place_joints if pre_success else seed_joints, 
-            method='J_pseudo', alpha=0.1)
-        
-        return {
-            'pre_place_pose': pre_place_pose,
-            'place_pose': place_pose,
-            'pre_place_joints': pre_place_joints if pre_success else None,
-            'place_joints': place_joints if place_success else None,
-            'success': pre_success and place_success
-        }
+# Now attempt to pick a dynamic block
+omega = 0.5  # Example angular velocity of turntable in rad/s
+theta_pick = 0.0  # Pick angle along x-axis
 
-    def detect_static(self, detector, T_CW, num_samples=5, detection_threshold=0.8, sleep_time=0.1):
-        """Block detection with temporal filtering and outlier rejection.""" 
-        all_detections = []
-        valid_blocks = {}
-
-        # Collect multiple samples
-        for _ in range(num_samples):
-            current_detections = []
-            for block, position in detector.get_detections():
-                if isinstance(position, np.ndarray) and position.shape == (4, 4):
-                    # Transform position to world frame
-                    world_pos = T_CW @ position
-                    current_detections.append({
-                        'id': block,
-                        'pose': world_pos,
-                        'position': world_pos[:3, 3]
-                    })
-            all_detections.append(current_detections)
-            sleep(sleep_time)  # Replace rospy.sleep with time.sleep
-
-        # Process and filter detections
-        for sample in all_detections:
-            for block in sample:
-                block_id = block['id']
-                if block_id not in valid_blocks:
-                    valid_blocks[block_id] = []
-                valid_blocks[block_id].append(block['position'])
-
-        filtered_blocks = []
-        for block_id, positions in valid_blocks.items():
-            if len(positions) >= num_samples * detection_threshold:
-                positions = np.array(positions)
-                median_pos = np.median(positions, axis=0)
-                filtered_blocks.append({
-                    'id': block_id,
-                    'position': median_pos,
-                    'confidence': len(positions) / num_samples
+def detect_static(detector, T_CW, num_samples=5, detection_threshold=0.8):
+    """
+    Detect static blocks and filter their positions.
+    """
+    all_detections = []
+    for _ in range(num_samples):
+        current_detections = []
+        for block, position in detector.get_detections():
+            if isinstance(position, np.ndarray) and position.shape == (4,4):
+                world_pos = T_CW @ position
+                current_detections.append({
+                    'id': block,
+                    'pose': world_pos,
+                    'position': world_pos[:3, 3]
                 })
+        all_detections.append(current_detections)
+        rospy.sleep(0.1)
+    return static.filter_block_detections(all_detections, num_samples, detection_threshold)
 
-        return sorted(filtered_blocks, key=lambda x: x['confidence'], reverse=True)
+def pick_place_static(arm, blocks, place_target):
+    current_joints = arm.get_positions()
+    stack_height = place_target[2]
 
-    def pick_place_static(self, arm, blocks, place_target, grasp_sleep=0.5, pre_grasp_sleep=0.2, place_sleep=0.3):
-        """Execute pick and place sequence for static blocks.""" 
-        stack_height = place_target[2]
-        current_joints = arm.get_positions()
+    for block in blocks:
+        pose_params = static.get_pick_place_pose_params(block['position'], stack_height, place_target)
 
-        for block in blocks:
-            # Plan pick-up
-            seed_joints = current_joints
-            pick_plan = self.plan_block_pickup(block['position'], seed_joints)
-            if not pick_plan['success']:
-                print(f"Failed to plan pick-up for block {block['id']}")
-                continue
+        pre_grasp = transform(*pose_params['pre_grasp'])
+        grasp = transform(*pose_params['grasp'])
+        lift_pose = transform(*pose_params['lift'])
+        pre_place = transform(*pose_params['pre_place'])
+        place = transform(*pose_params['place'])
+        retreat = transform(*pose_params['retreat'])
 
-            # Execute pick sequence
-            arm.safe_move_to_position(pick_plan['pre_grasp_joints'])
+        # Pre-grasp
+        pre_grasp_joints, _, success, _ = ik.inverse(pre_grasp, current_joints, method='J_pseudo', alpha=0.5)
+        if not success:
+            print("Failed to plan pre-grasp for static block")
+            continue
+        arm.safe_move_to_position(pre_grasp_joints)
+        arm.open_gripper()
+        rospy.sleep(0.2)
+
+        # Grasp
+        grasp_joints, _, success, _ = ik.inverse(grasp, pre_grasp_joints, method='J_pseudo', alpha=0.5)
+        if not success:
+            print("Failed to plan grasp for static block")
+            continue
+        arm.safe_move_to_position(grasp_joints)
+        arm.exec_gripper_cmd(0.045, 100)
+        rospy.sleep(0.5)
+
+        gripper_position = np.linalg.norm(arm.get_gripper_state()["position"])
+        print(f"Static block: Gripper position after grasp: {gripper_position}")
+
+        if gripper_position < 0.01:
+            # Failed to pick block, move to a safe position
+            recovery = transform(np.array([0.50, -0.2, 0.6]), np.array([0, pi, pi]))
+            recovery_joints, _, success, _ = ik.inverse(recovery, grasp_joints, method='J_pseudo', alpha=0.5)
+            if success:
+                arm.safe_move_to_position(recovery_joints)
+            continue
+
+        # Lift
+        lift_joints, _, success, _ = ik.inverse(lift_pose, grasp_joints, method='J_pseudo', alpha=0.5)
+        if success:
+            arm.safe_move_to_position(lift_joints)
+            rospy.sleep(0.2)
+
+        arm.set_arm_speed(0.2)
+        pre_place_joints, _, success, _ = ik.inverse(pre_place, lift_joints, method='J_pseudo', alpha=0.5)
+        if success:
+            arm.safe_move_to_position(pre_place_joints)
+
+        place_joints, _, success, _ = ik.inverse(place, pre_place_joints, method='J_pseudo', alpha=0.5)
+        if success:
+            arm.safe_move_to_position(place_joints)
+            rospy.sleep(0.2)
             arm.open_gripper()
-            sleep(pre_grasp_sleep)  # Replace rospy.sleep
+            rospy.sleep(0.3)
 
-            arm.safe_move_to_position(pick_plan['grasp_joints'])
-            arm.exec_gripper_cmd(0.045, 100)
-            sleep(grasp_sleep)  # Replace rospy.sleep
+        retreat_joints, _, success, _ = ik.inverse(retreat, place_joints, method='J_pseudo', alpha=0.5)
+        if success:
+            arm.safe_move_to_position(retreat_joints)
 
-            # Check grasp success and plan placement
-            place_plan = self.plan_block_placement(place_target, pick_plan['grasp_joints'])
-            if not place_plan['success']:
-                print(f"Failed to plan placement for block {block['id']}")
-                continue
+        arm.set_arm_speed(0.3)
+        stack_height += 0.05
+        current_joints = retreat_joints
 
-            # Execute place sequence
-            arm.safe_move_to_position(place_plan['pre_place_joints'])
-            arm.safe_move_to_position(place_plan['place_joints'])
-            arm.open_gripper()
-            sleep(place_sleep)  # Replace rospy.sleep
-            arm.safe_move_to_position(place_plan['pre_place_joints'])
 
-            current_joints = place_plan['pre_place_joints']
-            place_target[2] += 0.05
+def pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=0.0, R=0.305, z=0.200):
+    """
+    Function to pick a dynamic block off the rotating turntable.
+    """
+    # Move arm to observation position to see dynamic blocks
+    observation_joints = np.array([-0.01779206, -0.76012354, 0.01978261, -2.34205014, 
+                                   0.02984053, 1.54119353+pi/2, 0.75344866])
+    arm.safe_move_to_position(observation_joints)
 
-        return True
+    H_ee_camera = detector.get_H_ee_camera()
+    _, T_EW = fk.forward(observation_joints)
+    T_CW = T_EW @ H_ee_camera
+
+    # Detect dynamic blocks
+    all_detections = []
+    num_samples = 5
+    detection_threshold = 0.8
+
+    for _ in range(num_samples):
+        current_detections = []
+        for (name, pose) in detector.get_detections():
+            if isinstance(pose, np.ndarray) and pose.shape == (4,4):
+                if "dynamic" in name.lower():  # Identify dynamic blocks by name
+                    world_pos = T_CW @ pose
+                    current_detections.append({'id': name, 'position': world_pos[:3,3]})
+        all_detections.append(current_detections)
+        rospy.sleep(0.1)
+
+    filtered_blocks = static.filter_block_detections(all_detections, num_samples, detection_threshold)
+    if not filtered_blocks:
+        print("No dynamic blocks detected.")
+        return
+
+    dynamic_block = filtered_blocks[0]
+    block_position = dynamic_block['position']
+
+    # Get block orientation (assuming we can get it from detector)
+    block_orientation = None
+    for (name, pose) in detector.get_detections():
+        if name == dynamic_block['id']:
+            block_orientation = pose[:3,:3]
+            break
+
+    if block_orientation is None:
+        print("Could not retrieve orientation of dynamic block.")
+        return
+
+    t_now = time_in_seconds()
+
+    # Compute intercept
+    t_intercept, intercept_pos, intercept_orientation = dynamic.compute_dynamic_intercept(
+        block_position, block_orientation, t_now, omega, theta_pick, R=R, z=z
+    )
+
+    # Extract roll, pitch, yaw from intercept orientation
+    roll, pitch, yaw = dynamic.orientation_to_rpy(intercept_orientation)
+
+    # Approach from above
+    intercept_above = np.array([intercept_pos[0], intercept_pos[1], intercept_pos[2] + 0.10])
+    final_orientation = np.array([0, pi, pi + yaw])
+
+    pick_pose = transform(intercept_above, final_orientation)
+
+    current_joints = arm.get_positions()
+    pick_joints, _, success, _ = ik.inverse(pick_pose, current_joints, method='J_pseudo', alpha=0.5)
+    if not success:
+        print("Failed to plan intercept pose.")
+        return
+
+    arm.safe_move_to_position(pick_joints)
+
+    # Wait until block arrives (simple approach)
+    rospy.sleep(t_intercept)
+
+    # Descend to grasp
+    grasp_pose = transform(intercept_pos + np.array([0,0,0.01]), final_orientation)
+    grasp_joints, _, success, _ = ik.inverse(grasp_pose, pick_joints, method='J_pseudo', alpha=0.5)
+    if not success:
+        print("Failed IK for final grasp descent.")
+        return
+    arm.safe_move_to_position(grasp_joints)
+    arm.exec_gripper_cmd(0.045, 100)
+    rospy.sleep(0.5)
+
+    gripper_position = np.linalg.norm(arm.get_gripper_state()["position"])
+    print(f"Dynamic block: Gripper position after grasp: {gripper_position}")
+    if gripper_position < 0.01:
+        print("Failed to pick dynamic block.")
+        return
+
+    # Lift the block
+    lift_pose = transform(intercept_above, final_orientation)
+    lift_joints, _, success, _ = ik.inverse(lift_pose, grasp_joints, method='J_pseudo', alpha=0.5)
+    if success:
+        arm.safe_move_to_position(lift_joints)
+        rospy.sleep(0.2)
+
+    print("Dynamic block picked successfully!")
+
+
+def main():
+    try:
+        team = rospy.get_param("team")
+    except KeyError:
+        print('Team must be red or blue - make sure you are running final.launch!')
+        exit()
+
+    rospy.init_node("team_script")
+    arm = ArmController()
+    detector = ObjectDetector()
+
+    start_position = np.array([-0.01779206, -0.76012354,  0.01978261, -2.34205014, 
+                               0.02984053, 1.54119353+pi/2, 0.75344866])
+    arm.safe_move_to_position(start_position)
+
+    print("\n****************")
+    if team == 'blue':
+        print("** BLUE TEAM  **")
+        target_pose = transform(np.array([0.5, 0.1725, 0.55]), np.array([0, pi, pi]))
+        place_target = np.array([0.56, -0.155, 0.275])
+    else:
+        print("**  RED TEAM  **")
+        target_pose = transform(np.array([0.485, -0.17, 0.55]), np.array([0, pi, pi]))
+        place_target = np.array([0.55, 0.169, 0.27])
+    print("****************")
+    input("\nWaiting for start... Press ENTER to begin!\n")
+    print("Go!\n")
+
+    pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=theta_pick)
+
+    # IK for observation pose
+    observation_joints, _, success, _ = ik.inverse(
+        target=target_pose,
+        seed=start_position,
+        method='J_pseudo',
+        alpha=0.5
+    )
+    if not success:
+        print("Failed to compute IK for observation pose")
+        return
+
+    arm.set_arm_speed(0.3)
+    arm.safe_move_to_position(observation_joints)
+
+    H_ee_camera = detector.get_H_ee_camera()
+    joints_array = np.array(observation_joints)
+    _, T_EW = fk.forward(joints_array)
+    T_CW = T_EW @ H_ee_camera
+
+    # Detect and handle static blocks
+    block_positions = detect_static(detector, T_CW)
+    if block_positions:
+        pick_place_static(arm, block_positions, place_target)
+    else:
+        print("No static blocks detected")
+
+    
+
+if __name__ == "__main__":
+    main()

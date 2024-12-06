@@ -14,8 +14,9 @@ class DetectVisualTester:
     """Tester class for block detection visualization."""
 
     def __init__(self):
-        self.gripper_width = 0.08  # Increased width
-        self.finger_length = 0.05  # Increased length
+        self.gripper_width = 0.05  # Width between fingers
+        self.finger_length = 0.04  # Length of each finger
+        self.finger_thickness = 0.01  # Thickness of fingers
         self.grip_state = 0
         self.block_size = 0.05  # 5cm blocks
 
@@ -141,60 +142,61 @@ class DetectVisualTester:
             ax.plot3D(*zip(*edge), color='b')
 
     def plot_gripper_3d(self, ax, transform, grip_state=0):
-        """Plot gripper in 3D with opening/closing animation."""
+        """Plot gripper in 3D with two pinch points."""
         if not isinstance(transform, np.ndarray) or transform.shape != (4, 4):
             print("Warning: Invalid transform, using identity")
             transform = np.eye(4)
         
-        # Base gripper parameters
-        width = max(0.01, self.gripper_width * (1 - grip_state))  # Prevent complete closure
-        length = self.finger_length
-        height = 0.02  # Increased thickness
+        # Calculate width based on grip state
+        width = max(0.01, self.gripper_width * (1 - grip_state))
         
-        # Define gripper points including palm
-        palm_width = 0.03
-        palm = np.array([
-            [-0.01, -palm_width/2, 0],
-            [-0.01, palm_width/2, 0],
-            [-0.01, palm_width/2, height],
-            [-0.01, -palm_width/2, height]
+        # Define the two pinch points (left and right fingers)
+        left_finger_points = np.array([
+            [0, width/2, 0],  # base
+            [self.finger_length, width/2, 0],  # tip
+            [self.finger_length, width/2 + self.finger_thickness, 0],  # outer tip
+            [0, width/2 + self.finger_thickness, 0],  # outer base
+            [0, width/2, self.finger_thickness],  # base top
+            [self.finger_length, width/2, self.finger_thickness],  # tip top
+            [self.finger_length, width/2 + self.finger_thickness, self.finger_thickness],  # outer tip top
+            [0, width/2 + self.finger_thickness, self.finger_thickness]  # outer base top
         ])
         
-        left_finger = np.array([
-            [0, width/2, 0],
-            [length, width/2, 0],
-            [length, width/2, height],
-            [0, width/2, height]
-        ])
+        # Mirror the points for right finger
+        right_finger_points = left_finger_points.copy()
+        right_finger_points[:, 1] = -right_finger_points[:, 1]
         
-        right_finger = np.array([
-            [0, -width/2, 0],
-            [length, -width/2, 0],
-            [length, -width/2, height],
-            [0, -width/2, height]
-        ])
+        # Define faces for each finger
+        faces_indices = [
+            [0, 1, 2, 3],  # bottom
+            [4, 5, 6, 7],  # top
+            [0, 3, 7, 4],  # back
+            [1, 2, 6, 5],  # front
+            [0, 1, 5, 4],  # inner
+            [2, 3, 7, 6]   # outer
+        ]
         
         try:
-            # Transform and plot all parts
-            for part in [palm, left_finger, right_finger]:
-                points_h = np.hstack([part, np.ones((part.shape[0], 1))])
+            # Transform and plot both fingers
+            for finger_points in [left_finger_points, right_finger_points]:
+                points_h = np.hstack([finger_points, np.ones((finger_points.shape[0], 1))])
                 transformed = np.dot(transform, points_h.T).T[:, :3]
                 
-                # Create surface
-                poly = Poly3DCollection([transformed], alpha=0.5, color='red')
+                # Create faces
+                finger_faces = [[transformed[idx] for idx in face] for face in faces_indices]
+                poly = Poly3DCollection(finger_faces, alpha=0.5, color='red')
                 ax.add_collection3d(poly)
                 
-                # Plot edges
-                ax.plot(transformed[[0,1,2,3,0], 0],
-                       transformed[[0,1,2,3,0], 1],
-                       transformed[[0,1,2,3,0], 2],
-                       'r-', linewidth=2)
+                # Draw edges
+                for face in faces_indices:
+                    points = transformed[face + [face[0]]]
+                    ax.plot(points[:, 0], points[:, 1], points[:, 2], 'r-', linewidth=1)
             
             # Add gripper base point
             base_point = transform[:3, 3]
             ax.scatter([base_point[0]], [base_point[1]], [base_point[2]], 
                       color='red', s=100, marker='o')
-        
+            
         except Exception as e:
             print(f"Error plotting gripper: {e}")
             ax.scatter([transform[0,3]], [transform[1,3]], [transform[2,3]], 
