@@ -278,6 +278,9 @@ def main():
     input("\nWaiting for start... Press ENTER to begin!\n")
     print("Go!\n")
 
+    # Now attempt dynamic block picking
+    pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=theta_pick)
+    
     # Compute IK for observation pose (static)
     observation_joints, _, success, _ = ik.inverse(
         target=target_pose, 
@@ -303,9 +306,6 @@ def main():
         pick_place_static(arm, static_blocks, place_target)
     else:
         print("No static blocks detected")
-
-    # Now attempt dynamic block picking
-    pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=theta_pick)
 
 if __name__ == "__main__":
     main()
