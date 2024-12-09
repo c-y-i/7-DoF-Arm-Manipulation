@@ -29,6 +29,7 @@ class FrankaIK:
             If no valid solution is found for a particular solution branch, that row is filled with NaN.
         """
 
+        print("Computing IK for Franka Panda robot...")
         # Define robot geometry (link lengths and offsets)
         link_lengths = [0.3330, 0.3160, 0.3840, 0.2104]
         offsets = [0.0825, 0.0880]

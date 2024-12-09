@@ -14,6 +14,7 @@ from core.utils import trans, roll, pitch, yaw, transform
 
 # Import your FrankaIK class
 from lib.franka_IK import FrankaIK
+from lib.IK_velocity_null import IK_velocity_null  # Import IK_velocity_null
 
 ik = IK()  # Primary IK solver
 fk = FK()
@@ -315,35 +316,83 @@ def pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=0.0, R=0.305, z=
     print(f"Pick pose:\n{pick_pose}")
 
     current_joints = arm.get_positions()
-    
-    pick_joints, _, success, _ = ik.inverse(pick_pose, current_joints, method='J_pseudo', alpha=0.5)
-    print(f"IK success: {success}, Pick joints: {pick_joints}")
+    # Initialize alpha values to try
+    alpha_values = [0.5, 0.1, 0.05]
+    success = False
 
-    if not success:
-        print("IK inverse failed, trying franka_ik.compute_ik")
-        # Use the last joint of the current configuration as q7
-        q7 = current_joints[-1]
-        # Provide a valid nominal configuration for qa:
-        qa = [0.0, 0.0, 0.0, -1.5, 0.0, 1.5, 0.0]
+    # First segment: move above pick position, keep current orientation
+    intercept_above = np.array([intercept_pos[0], intercept_pos[1], intercept_pos[2] + 0.10])
 
-        # Flatten the pick_pose into a list
-        T_array = pick_pose.flatten().tolist()
-        fallback_solutions = franka_ik.compute_ik(T_array, q7, qa)
+    # Use the current end-effector orientation
+    _, T_EE_current = fk.forward(current_joints)
+    current_orientation_matrix = T_EE_current[:3, :3]
+    current_orientation = Rotation.from_matrix(current_orientation_matrix).as_euler('xyz')
+    pick_pose_above = transform(intercept_above, current_orientation)
+    print(f"Pick pose above (keeping current orientation):\n{pick_pose_above}")
 
-        fallback_joints = None
-        # fallback_solutions is a 4x7 array. Find the first non-NaN row.
-        for sol in fallback_solutions:
-            if not np.isnan(sol).any():
-                fallback_joints = sol
-                break
-
-        if fallback_joints is None:
-            print("Failed to plan intercept pose with Franka IK.")
-            return
+    for alpha in alpha_values:
+        print(f"Trying IK with alpha={alpha} for pick_pose_above")
+        pick_joints_above, _, success, _ = ik.inverse(pick_pose_above, current_joints, method='J_pseudo', alpha=alpha)
+        if success:
+            print("IK succeeded for pick_pose_above")
+            break
         else:
-            print(f"Franka IK solution found: {fallback_joints}")
-            pick_joints = fallback_joints
+            print(f"IK failed for alpha={alpha}")
+    if not success:
+        print("All IK attempts failed for pick_pose_above.")
+        # Proceed to try IK_velocity_null or other methods if desired
+        return
 
+    arm.safe_move_to_position(pick_joints_above)
+    print("Moved to position above pick point.")
+
+    # Second segment: change orientation while moving down to pick position
+    pick_pose = transform(intercept_pos + np.array([0, 0, 0.01]), final_orientation)
+    print(f"Pick pose (changing orientation):\n{pick_pose}")
+
+    for alpha in alpha_values:
+        print(f"Trying IK with alpha={alpha} for pick_pose")
+        pick_joints, _, success, _ = ik.inverse(pick_pose, pick_joints_above, method='J_pseudo', alpha=alpha)
+        if success:
+            print("IK succeeded for pick_pose")
+            break
+        else:
+            print(f"IK failed for alpha={alpha}")
+    if not success:
+        print("All IK attempts failed for pick_pose.")
+        # Try IK_velocity_null as the next fallback
+        print("Attempting IK_velocity_null as fallback.")
+        # Compute desired displacement
+        _, T_EE_current = fk.forward(pick_joints_above)
+        position_displacement, rotation_axis = IK.displacement_and_axis(pick_pose, T_EE_current)
+        v_in = position_displacement
+        omega_in = rotation_axis
+        b = IK.joint_centering_task(pick_joints_above)
+        # Compute joint velocities using IK_velocity_null
+        dq = IK_velocity_null(pick_joints_above, v_in, omega_in, b)
+        pick_joints = pick_joints_above + dq.flatten()
+        # Check if the new joints are valid
+        success_ikv, _ = ik.is_valid_solution(pick_joints, pick_pose)
+        if success_ikv:
+            print("IK_velocity_null succeeded.")
+        else:
+            print("IK_velocity_null failed, trying Franka IK as last fallback.")
+            # Use Franka IK as the final fallback
+            q7 = pick_joints_above[-1]
+            qa = [0.0, 0.0, 0.0, -1.5, 0.0, 1.5, 0.0]
+            T_array = pick_pose.flatten().tolist()
+            fallback_solutions = franka_ik.compute_ik(T_array, q7, qa)
+            fallback_joints = None
+            for sol in fallback_solutions:
+                if not np.isnan(sol).any():
+                    fallback_joints = sol
+                    break
+            if fallback_joints is None:
+                print("Failed to plan pick pose with Franka IK.")
+                return
+            else:
+                print(f"Franka IK solution found: {fallback_joints}")
+                pick_joints = fallback_joints
 
     arm.safe_move_to_position(pick_joints)
     print("Moved to pick position.")
@@ -397,6 +446,9 @@ def main():
     rospy.init_node("team_script")
     arm = ArmController()
     detector = ObjectDetector()
+    # Attempt to pick a dynamic block using fallback IK if needed
+    pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=theta_pick)
+
     
     start_position = np.array([-0.01779206, -0.76012354, 0.01978261, -2.34205014, 0.02984053, 1.54119353+pi/2, 0.75344866])
     arm.safe_move_to_position(start_position)
@@ -433,8 +485,7 @@ def main():
     else:
         print("No blocks detected (static)")
     
-    # Attempt to pick a dynamic block using fallback IK if needed
-    pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=theta_pick)
+    
 
 if __name__ == "__main__":
     main()
