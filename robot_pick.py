@@ -223,8 +223,10 @@ def pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=0.0, R=0.305, z=
         return
 
     arm.safe_move_to_position(pick_joints)
-
+    
     # Wait until block arrives
+    # record when block was detected, keep sleeping for small interval (0.1s) until detected time + t_intercept
+    # then move down to pick
     rospy.sleep(t_intercept)
 
     grasp_pose = transform(intercept_pos + np.array([0,0,0.01]), final_orientation)

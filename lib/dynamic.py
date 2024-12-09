@@ -3,32 +3,22 @@ from math import pi, atan2, sin, cos
 
 def compute_dynamic_intercept(block_position, block_orientation, t_now, omega, theta_pick, R=0.305, z=0.200):
     """
-    Compute the intercept time and predicted pose for a dynamic block on a rotating turntable.
-    block_position: current [x, y, z]
-    block_orientation: 3x3 rotation matrix for block orientation
-    t_now: current time (seconds)
-    omega: angular velocity (rad/s) of turntable
-    theta_pick: angle at which we want to pick the block
-    R: radius of turntable
-    z: height of turntable surface
-
-    Returns:
-    - t_intercept: time in seconds until block reaches theta_pick
-    - intercept_pos: [x, y, z] of block at intercept time
-    - intercept_orientation: 3x3 rotation matrix of block at intercept time
+    TODO: Test the function in simulation and IRL
     """
     x, y, _ = block_position
-    theta_now = atan2(y, x)
+    # theta_now = t_now
+    # theta_now = atan2(abs(y), x)
+    theta_now = atan2(abs(x), abs(y))
 
-    dtheta = theta_pick - theta_now
-    if dtheta < 0:
-        dtheta += 2*pi
+    dtheta = abs(theta_pick - abs(theta_now))
+    # if dtheta < 0:
+    #     dtheta += 2*pi
 
     t_intercept = dtheta / omega
 
     # Future position
-    x_intercept = R * cos(theta_pick)
-    y_intercept = R * sin(theta_pick)
+    y_intercept = R * cos(theta_pick)
+    x_intercept = R * sin(theta_pick)
     z_intercept = z
 
     # Future orientation

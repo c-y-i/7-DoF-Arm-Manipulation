@@ -25,7 +25,7 @@ fk = FK()
 # Dynamic observation pose in Cartesian space.
 # Position (x, y, z) and orientation (roll, pitch, yaw).
 # Tune these so the camera looks down onto the dynamic turntable at the origin.
-dynamic_observation_position = np.array([0.0, 0.0, 0.7])
+dynamic_observation_position = np.array([0, 0.5, 0.7])
 dynamic_observation_orientation = np.array([0, pi, pi])  # facing downward
 
 # Angular velocity of the turntable (rad/s)
@@ -193,22 +193,25 @@ def pick_place_static(arm, blocks, place_target):
 ## Dynamic Block Functions ##
 #############################
 
+
 def compute_dynamic_intercept(block_position, block_orientation, t_now, omega, theta_pick, R=0.305, z=0.200):
     """
-    Compute intercept time and predicted pose for a dynamic block on a rotating turntable.
+    TODO: Test the function in simulation and IRL
     """
     x, y, _ = block_position
-    theta_now = atan2(y, x)
+    # theta_now = t_now
+    # theta_now = atan2(abs(y), x)
+    theta_now = atan2(abs(x), abs(y))
 
-    dtheta = theta_pick - theta_now
-    if dtheta < 0:
-        dtheta += 2*pi
+    dtheta = abs(theta_pick - abs(theta_now))
+    # if dtheta < 0:
+    #     dtheta += 2*pi
 
     t_intercept = dtheta / omega
 
     # Future position
-    x_intercept = R * cos(theta_pick)
-    y_intercept = R * sin(theta_pick)
+    y_intercept = R * cos(theta_pick)
+    x_intercept = R * sin(theta_pick)
     z_intercept = z
 
     # Future orientation
