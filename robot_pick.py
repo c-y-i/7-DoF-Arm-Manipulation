@@ -7,6 +7,7 @@ from lib.IK_position_null import IK
 from lib.calculateFK import FK
 from core.utils import time_in_seconds, transform
 from lib.franka_IK import FrankaIK
+from scipy.spatial.transform import Rotation
 
 import lib.dynamic as dynamic  # Our dynamic computations module
 
@@ -201,23 +202,20 @@ def pick_dynamic_block(arm, detector, fk, ik, transform, time_in_seconds, dynami
     """
     print("Starting pick_dynamic_block")
 
-    # Move to dynamic observation pose
-    dynamic_observation_pose = transform(dynamic_observation_position, dynamic_observation_orientation)
-    current_joints = arm.get_positions()
-    obs_joints, _, success, _ = ik.inverse(dynamic_observation_pose, current_joints, method='J_pseudo', alpha=0.5)
-    if not success:
-        print("Failed to compute IK for dynamic observation position.")
+    if not move_arm_to_dynamic_observation(arm, ik):
+        print("Failed to move arm to dynamic observation position.")
         return
-    arm.safe_move_to_position(obs_joints)
-    print("Arm moved to dynamic observation pose.")
 
     obs_joints = arm.get_positions()
+    print(f"Observation joints: {obs_joints}")
+
     _, T_EW = fk.forward(obs_joints)
     H_ee_camera = detector.get_H_ee_camera()
     T_CW = T_EW @ H_ee_camera
+    print(f"T_CW Matrix:\n{T_CW}")
 
     # Detect dynamic blocks
-    num_samples = 5
+    num_samples = 4
     detection_threshold = 0.8
     all_detections = []
     for _ in range(num_samples):
@@ -229,36 +227,18 @@ def pick_dynamic_block(arm, detector, fk, ik, transform, time_in_seconds, dynami
                     current_detections.append({'id': name, 'position': world_pos[:3,3]})
         all_detections.append(current_detections)
         rospy.sleep(0.1)
-
-    def filter_block_detections(all_detections, num_samples=5, detection_threshold=0.8):
-        valid_blocks = {}
-        for sample in all_detections:
-            for block in sample:
-                block_id = block['id']
-                if block_id not in valid_blocks:
-                    valid_blocks[block_id] = []
-                valid_blocks[block_id].append(block['position'])
-
-        filtered_blocks = []
-        for block_id, positions in valid_blocks.items():
-            if len(positions) >= num_samples * detection_threshold:
-                positions = np.array(positions)
-                median_pos = np.median(positions, axis=0)
-                filtered_blocks.append({
-                    'id': block_id,
-                    'position': median_pos,
-                    'confidence': len(positions) / num_samples
-                })
-        return sorted(filtered_blocks, key=lambda x: x['confidence'], reverse=True)
+    print(f"All detections: {all_detections}")
 
     filtered_blocks = filter_block_detections(all_detections, num_samples, detection_threshold)
+    print(f"Filtered blocks: {filtered_blocks}")
+
     if not filtered_blocks:
         print("No dynamic blocks detected.")
         return
 
     dynamic_block = filtered_blocks[0]
     block_position = dynamic_block['position']
-    print(f"Selected dynamic block: {dynamic_block['id']} at position {block_position}")
+    print(f"Selected dynamic block position: {block_position}")
 
     # Get block orientation
     block_orientation = None
@@ -266,50 +246,132 @@ def pick_dynamic_block(arm, detector, fk, ik, transform, time_in_seconds, dynami
         if name == dynamic_block['id']:
             block_orientation = pose[:3,:3]
             break
+    print(f"Block orientation:\n{block_orientation}")
 
     if block_orientation is None:
         print("Could not retrieve orientation of dynamic block.")
         return
 
     t_now = time_in_seconds()
+    print(f"Current time: {t_now}")
+
+    # Compute intercept
     t_intercept, intercept_pos, intercept_orientation = dynamic.compute_dynamic_intercept(
         block_position, block_orientation, t_now, omega, theta_pick, R=R, z=z
     )
-    roll, pitch, yaw = dynamic.orientation_to_rpy(intercept_orientation)
+    print(f"Intercept time: {t_intercept}")
+    print(f"Intercept position: {intercept_pos}")
+    print(f"Intercept orientation:\n{intercept_orientation}")
 
-    # We'll move the arm in two steps:
-    # 1) Hover above the intercept position
-    # 2) Move down to the final grasp pose
+    roll, pitch, yaw = dynamic.orientation_to_rpy(intercept_orientation)
+    print(f"Intercept orientation (rpy): roll={roll}, pitch={pitch}, yaw={yaw}")
 
     intercept_above = np.array([intercept_pos[0], intercept_pos[1], intercept_pos[2] + 0.10])
     final_orientation = np.array([0, pi, pi + yaw])
+    pick_pose = transform(intercept_above, final_orientation)
+    print(f"Pick pose:\n{pick_pose}")
 
-    # Step 1: Move to hover pose
-    hover_pose = transform(intercept_above, final_orientation)
     current_joints = arm.get_positions()
-    hover_joints, _, success, _ = ik.inverse(hover_pose, current_joints, method='J_pseudo', alpha=0.5)
+    # Initialize alpha values to try
+    alpha_values = [0.5, 0.1, 0.05]
+    success = False
+
+    # First segment: move above pick position, keep current orientation
+    intercept_above = np.array([intercept_pos[0], intercept_pos[1], intercept_pos[2] + 0.10])
+
+    # Use the current end-effector orientation
+    _, T_EE_current = fk.forward(current_joints)
+    current_orientation_matrix = T_EE_current[:3, :3]
+    current_orientation = Rotation.from_matrix(current_orientation_matrix).as_euler('xyz')
+    pick_pose_above = transform(intercept_above, current_orientation)
+    print(f"Pick pose above (keeping current orientation):\n{pick_pose_above}")
+
+    for alpha in alpha_values:
+        print(f"Trying IK with alpha={alpha} for pick_pose_above")
+        pick_joints_above, _, success, _ = ik.inverse(pick_pose_above, current_joints, method='J_pseudo', alpha=alpha)
+        if success:
+            print("IK succeeded for pick_pose_above")
+            break
+        else:
+            print(f"IK failed for alpha={alpha}")
     if not success:
-        print("Failed to find IK solution for hover pose above intercept point.")
+        print("All IK attempts failed for pick_pose_above.")
+        # Proceed to try IK_velocity_null or other methods if desired
         return
-    arm.safe_move_to_position(hover_joints)
-    print("Arm moved to hover position above intercept point.")
 
-    # Wait until the block arrives at the intercept position
+    arm.safe_move_to_position(pick_joints_above)
+    print("Moved to position above pick point.")
+
+    # Second segment: change orientation while moving down to pick position
+    pick_pose = transform(intercept_pos + np.array([0, 0, 0.01]), final_orientation)
+    print(f"Pick pose (changing orientation):\n{pick_pose}")
+
+    for alpha in alpha_values:
+        print(f"Trying IK with alpha={alpha} for pick_pose")
+        pick_joints, _, success, _ = ik.inverse(pick_pose, pick_joints_above, method='J_pseudo', alpha=alpha)
+        if success:
+            print("IK succeeded for pick_pose")
+            break
+        else:
+            print(f"IK failed for alpha={alpha}")
+    if not success:
+        print("All IK attempts failed for pick_pose.")
+        # Try IK_velocity_null as the next fallback
+        print("Attempting IK_velocity_null as fallback.")
+        # Compute desired displacement
+        _, T_EE_current = fk.forward(pick_joints_above)
+        position_displacement, rotation_axis = IK.displacement_and_axis(pick_pose, T_EE_current)
+        v_in = position_displacement
+        omega_in = rotation_axis
+        b = IK.joint_centering_task(pick_joints_above)
+        # Compute joint velocities using IK_velocity_null
+        dq = dynamic.IK_velocity_null(pick_joints_above, v_in, omega_in, b)
+        pick_joints = pick_joints_above + dq.flatten()
+        # Check if the new joints are valid
+        success_ikv, _ = ik.is_valid_solution(pick_joints, pick_pose)
+        if success_ikv:
+            print("IK_velocity_null succeeded.")
+        else:
+            print("IK_velocity_null failed, trying Franka IK as last fallback.")
+            # Use Franka IK as the final fallback
+            q7 = pick_joints_above[-1]
+            qa = [0.0, 0.0, 0.0, -1.5, 0.0, 1.5, 0.0]
+            T_array = pick_pose.flatten().tolist()
+            fallback_solutions = franka_ik.compute_ik(T_array, q7, qa)
+            fallback_joints = None
+            for sol in fallback_solutions:
+                if not np.isnan(sol).any():
+                    fallback_joints = sol
+                    break
+            if fallback_joints is None:
+                print("Failed to plan pick pose with Franka IK.")
+                return
+            else:
+                print(f"Franka IK solution found: {fallback_joints}")
+                pick_joints = fallback_joints
+
+    arm.safe_move_to_position(pick_joints)
+    print("Moved to pick position.")
+
     rospy.sleep(t_intercept)
-    print(f"Waited {t_intercept} s for block to arrive.")
+    print(f"Slept for intercept time: {t_intercept} seconds")
 
-    # Step 2: Move straight down to grasp pose
     grasp_pose = transform(intercept_pos + np.array([0,0,0.01]), final_orientation)
-    grasp_joints, _, success, _ = ik.inverse(grasp_pose, hover_joints, method='J_pseudo', alpha=0.5)
+    print(f"Grasp pose:\n{grasp_pose}")
+
+    grasp_joints, _, success, _ = ik.inverse(grasp_pose, pick_joints, method='J_pseudo', alpha=0.5)
+    print(f"IK success: {success}, Grasp joints: {grasp_joints}")
+
     if not success:
         print("Failed IK for final grasp descent.")
         return
-    arm.safe_move_to_position(grasp_joints)
-    print("Arm moved down to grasp position.")
 
-    # Close gripper to grasp block
+    arm.safe_move_to_position(grasp_joints)
+    print("Moved to grasp position.")
+
     arm.exec_gripper_cmd(0.045, 100)
     rospy.sleep(0.5)
+    print("Gripper command executed.")
 
     gripper_state = arm.get_gripper_state()
     gripper_position = np.linalg.norm(gripper_state["position"])
@@ -319,9 +381,11 @@ def pick_dynamic_block(arm, detector, fk, ik, transform, time_in_seconds, dynami
         print("Failed to pick dynamic block.")
         return
 
-    # Lift the block after grasp
+    # Lift
     lift_pose = transform(intercept_above, final_orientation)
     lift_joints, _, success, _ = ik.inverse(lift_pose, grasp_joints, method='J_pseudo', alpha=0.5)
+    print(f"Lifting IK success: {success}, Lift joints: {lift_joints}")
+
     if success:
         arm.safe_move_to_position(lift_joints)
         rospy.sleep(0.2)
