@@ -441,7 +441,7 @@ class VisualTester:
         if self.save_animation:
             print("\nSaving animation as GIF...")
             ani.save(
-                "media/pick_place_visualization.gif",
+                "../media/pick_place_visualization.gif",
                 writer='pillow',
                 fps=20,
                 progress_callback=lambda i, n: print(f'Saving frame {i} of {n}')

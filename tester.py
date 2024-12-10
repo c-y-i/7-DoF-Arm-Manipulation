@@ -24,7 +24,7 @@ dynamic_blocks_collected = 0
 
 def load_config(team):
     print(f"Loading configuration for team: {team}")
-    with open("../../config.json", "r") as f:
+    with open("config.json", "r") as f:
         data = json.load(f)
     return data["team_data"][team]
 
