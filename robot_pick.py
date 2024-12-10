@@ -231,14 +231,14 @@ def pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=0.0, R=0.305, z=
     
 
     # Compute intercept
-    t_intercept, intercept_pos, intercept_orientation = compute_dynamic_intercept(
+    t_intercept, intercept_pos, intercept_orientation = dynamic.compute_dynamic_intercept(
         block_position, block_orientation, t_now, omega, theta_pick, R=R, z=z
     )
     print(f"Intercept time: {t_intercept}")
     print(f"Intercept position: {intercept_pos}")
     print(f"Intercept orientation:\n{intercept_orientation}")
 
-    roll, pitch, yaw = orientation_to_rpy(intercept_orientation)
+    roll, pitch, yaw = dynamic.orientation_to_rpy(intercept_orientation)
     print(f"Intercept orientation (rpy): roll={roll}, pitch={pitch}, yaw={yaw}")
 
     intercept_above = np.array([intercept_pos[0], intercept_pos[1], intercept_pos[2] + 0.10])
