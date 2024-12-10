@@ -24,7 +24,7 @@ dynamic_blocks_collected = 0
 
 def load_config(team):
     print(f"Loading configuration for team: {team}")
-    with open("../../config.json", "r") as f:
+    with open("config.json", "r") as f:
         data = json.load(f)
     return data["team_data"][team]
 
@@ -203,7 +203,7 @@ def place_dynamic_block(arm, data):
         print("Failed to plan dynamic pre-place")
         return
     place = transform(
-        np.array([dynamicPlaceTarget[0], dynamicPlaceTarget[1], stack_height - 0.025]),
+        np.array([dynamicPlaceTarget[0], dynamicPlaceTarget[1], stack_height - 0.03]),
         np.array([0, pi, pi])
     )
     place_joints, success = move_to_target_pose(arm, place, pre_place_joints, ik)
@@ -287,11 +287,10 @@ def main():
     print("Go!\n")
     global dynamic_blocks_collected
     max_dynamic_blocks = 8
-    for i in range(max_dynamic_blocks):
-        retrieve_dynamic_block(arm, data)
-        if dynamic_blocks_collected >= max_dynamic_blocks:
-            print("Collected maximum number of dynamic blocks")
-            break
+    print("Dynamic Attempt Starts")
+    retrieve_dynamic_block(arm, data)
+    max_dynamic_blocks -= 1
+    print("Beginning static block sequence")
     observation_joints, success = move_to_target_pose(arm, target_pose, start_position, ik)
     if not success:
         print("Failed to compute IK for observation pose")
@@ -307,5 +306,11 @@ def main():
     else:
         print("No static blocks detected")
 
+    for i in range(max_dynamic_blocks):
+        retrieve_dynamic_block(arm, data)
+        if dynamic_blocks_collected >= max_dynamic_blocks:
+            print("Collected maximum number of dynamic blocks")
+            break
+    
 if __name__ == "__main__":
     main()
