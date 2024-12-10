@@ -299,6 +299,15 @@ def pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=0.0, R=0.305, z=
     t_now = time_in_seconds()
     print(f"Current time: {t_now}")
 
+    # Determine y_offset based on the y difference between the observation pose and position
+    y_offset = abs(dynamic_observation_position[1] - block_position[1])
+    print(f"Determined y_offset: {y_offset}")
+
+    if y_offset > 0.55 or y_offset < 0.3:
+        print("Incorrect y offset, using pre-set value")
+        y_offset = 0.45
+    
+
     # Compute intercept
     t_intercept, intercept_pos, intercept_orientation = compute_dynamic_intercept(
         block_position, block_orientation, t_now, omega, theta_pick, R=R, z=z
@@ -317,11 +326,11 @@ def pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=0.0, R=0.305, z=
 
     current_joints = arm.get_positions()
     # Initialize alpha values to try
-    alpha_values = [0.5, 0.1, 0.05]
+    alpha_values = [0.6, 0.5, 0.25, 0.1, 0.05]
     success = False
 
     # First segment: move above pick position, keep current orientation
-    intercept_above = np.array([intercept_pos[0], intercept_pos[1], intercept_pos[2] + 0.10])
+    intercept_above = np.array([intercept_pos[0], intercept_pos[1] + y_offset, intercept_pos[2] + 0.10])
 
     # Use the current end-effector orientation
     _, T_EE_current = fk.forward(current_joints)
@@ -345,9 +354,10 @@ def pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=0.0, R=0.305, z=
 
     arm.safe_move_to_position(pick_joints_above)
     print("Moved to position above pick point.")
+    grasp_pose_offset = np.array([intercept_pos[0], intercept_pos[1] + y_offset, intercept_pos[2]])
 
     # Second segment: change orientation while moving down to pick position
-    pick_pose = transform(intercept_pos + np.array([0, 0, 0.01]), final_orientation)
+    pick_pose = transform(grasp_pose_offset + np.array([0, 0, 0.05]), final_orientation)
     print(f"Pick pose (changing orientation):\n{pick_pose}")
 
     for alpha in alpha_values:
@@ -403,9 +413,19 @@ def pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=0.0, R=0.305, z=
     grasp_pose = transform(intercept_pos + np.array([0,0,0.01]), final_orientation)
     print(f"Grasp pose:\n{grasp_pose}")
 
-    grasp_joints, _, success, _ = ik.inverse(grasp_pose, pick_joints, method='J_pseudo', alpha=0.5)
+    
+    grasp_joints, _, success, _ = ik.inverse(grasp_pose_offset, pick_joints, method='J_pseudo', alpha=0.5)
     print(f"IK success: {success}, Grasp joints: {grasp_joints}")
 
+    for alpha in alpha_values:
+        print(f"Trying IK with alpha={alpha} for grasp_pose")
+        pick_joints_above, _, success, _ = ik.inverse(grasp_pose_offset, pick_joints, method='J_pseudo', alpha=alpha)
+        if success:
+            print("IK succeeded for grasp_pose")
+            break
+        else:
+            print(f"IK failed for alpha={alpha}")
+        
     if not success:
         print("Failed IK for final grasp descent.")
         return
@@ -447,7 +467,6 @@ def main():
     arm = ArmController()
     detector = ObjectDetector()
     # Attempt to pick a dynamic block using fallback IK if needed
-    pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=theta_pick)
 
     
     start_position = np.array([-0.01779206, -0.76012354, 0.01978261, -2.34205014, 0.02984053, 1.54119353+pi/2, 0.75344866])
@@ -466,6 +485,8 @@ def main():
     input("\nWaiting for start... Press ENTER to begin!\n")
     print("Go!\n")
     
+    pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=theta_pick)
+
     observation_joints, success = move_to_target_pose(arm, target_pose, start_position, ik)
     if not success:
         print("Failed to compute IK for observation pose")

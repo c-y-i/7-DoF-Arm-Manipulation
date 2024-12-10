@@ -5,6 +5,7 @@ import rospy
 from core.interfaces import ArmController, ObjectDetector
 from lib.IK_position_null import IK
 from lib.calculateFK import FK
+import lib.IK_velocity_null as IK_velocity_null
 from core.utils import time_in_seconds, transform
 from lib.franka_IK import FrankaIK
 from scipy.spatial.transform import Rotation
@@ -161,44 +162,9 @@ def move_arm_to_dynamic_observation(arm, ik_solver):
     arm.safe_move_to_position(obs_joints)
     return True
 
-def pick_dynamic_block(arm, detector, fk, ik, transform, time_in_seconds, dynamic, 
-                       dynamic_observation_position, dynamic_observation_orientation,
-                       omega=0.5, theta_pick=0.0, R=0.305, z=0.200):
+def pick_dynamic_block(arm, detector, fk, ik, omega, theta_pick=0.0, R=0.305, z=0.200):
     """
-    Attempts to pick a dynamic block off the rotating turntable using a two-step IK approach.
-
-    Parameters
-    ----------
-    arm : ArmController
-        The arm controller instance (has methods like get_positions, safe_move_to_position, exec_gripper_cmd).
-    detector : ObjectDetector
-        The object detector instance (has get_detections method).
-    fk : FK
-        Forward kinematics instance with a forward method returning (positions, T_EW).
-    ik : IK
-        Inverse kinematics instance with inverse method returning (joints, _, success, _).
-    transform : function
-        A function that takes (position, orientation) and returns a 4x4 transform matrix.
-    time_in_seconds : function
-        Returns current time in seconds.
-    dynamic : module
-        Must contain compute_dynamic_intercept and orientation_to_rpy functions.
-    dynamic_observation_position : array-like (3,)
-        [x, y, z] position to move the arm to observe the dynamic environment.
-    dynamic_observation_orientation : array-like (3,)
-        [roll, pitch, yaw] orientation for the observation pose.
-    omega : float
-        Angular velocity of the turntable (rad/s).
-    theta_pick : float
-        Desired pick angle (0.0 = along x-axis, for example).
-    R : float
-        Radius of the turntable or the expected block path.
-    z : float
-        Desired intercept height.
-
-    Returns
-    -------
-    None
+    Attempt to pick a dynamic block off the rotating turntable.
     """
     print("Starting pick_dynamic_block")
 
@@ -255,15 +221,24 @@ def pick_dynamic_block(arm, detector, fk, ik, transform, time_in_seconds, dynami
     t_now = time_in_seconds()
     print(f"Current time: {t_now}")
 
+    # Determine y_offset based on the y difference between the observation pose and position
+    y_offset = abs(dynamic_observation_position[1] - block_position[1])
+    print(f"Determined y_offset: {y_offset}")
+
+    if y_offset > 0.55 or y_offset < 0.3:
+        print("Incorrect y offset, using pre-set value")
+        y_offset = 0.45
+    
+
     # Compute intercept
-    t_intercept, intercept_pos, intercept_orientation = dynamic.compute_dynamic_intercept(
+    t_intercept, intercept_pos, intercept_orientation = compute_dynamic_intercept(
         block_position, block_orientation, t_now, omega, theta_pick, R=R, z=z
     )
     print(f"Intercept time: {t_intercept}")
     print(f"Intercept position: {intercept_pos}")
     print(f"Intercept orientation:\n{intercept_orientation}")
 
-    roll, pitch, yaw = dynamic.orientation_to_rpy(intercept_orientation)
+    roll, pitch, yaw = orientation_to_rpy(intercept_orientation)
     print(f"Intercept orientation (rpy): roll={roll}, pitch={pitch}, yaw={yaw}")
 
     intercept_above = np.array([intercept_pos[0], intercept_pos[1], intercept_pos[2] + 0.10])
@@ -273,11 +248,11 @@ def pick_dynamic_block(arm, detector, fk, ik, transform, time_in_seconds, dynami
 
     current_joints = arm.get_positions()
     # Initialize alpha values to try
-    alpha_values = [0.5, 0.1, 0.05]
+    alpha_values = [0.6, 0.5, 0.25, 0.1, 0.05]
     success = False
 
     # First segment: move above pick position, keep current orientation
-    intercept_above = np.array([intercept_pos[0], intercept_pos[1], intercept_pos[2] + 0.10])
+    intercept_above = np.array([intercept_pos[0], intercept_pos[1] + y_offset, intercept_pos[2] + 0.10])
 
     # Use the current end-effector orientation
     _, T_EE_current = fk.forward(current_joints)
@@ -301,9 +276,10 @@ def pick_dynamic_block(arm, detector, fk, ik, transform, time_in_seconds, dynami
 
     arm.safe_move_to_position(pick_joints_above)
     print("Moved to position above pick point.")
+    grasp_pose_offset = np.array([intercept_pos[0], intercept_pos[1] + y_offset, intercept_pos[2]])
 
     # Second segment: change orientation while moving down to pick position
-    pick_pose = transform(intercept_pos + np.array([0, 0, 0.01]), final_orientation)
+    pick_pose = transform(grasp_pose_offset + np.array([0, 0, 0.05]), final_orientation)
     print(f"Pick pose (changing orientation):\n{pick_pose}")
 
     for alpha in alpha_values:
@@ -325,7 +301,7 @@ def pick_dynamic_block(arm, detector, fk, ik, transform, time_in_seconds, dynami
         omega_in = rotation_axis
         b = IK.joint_centering_task(pick_joints_above)
         # Compute joint velocities using IK_velocity_null
-        dq = dynamic.IK_velocity_null(pick_joints_above, v_in, omega_in, b)
+        dq = IK_velocity_null(pick_joints_above, v_in, omega_in, b)
         pick_joints = pick_joints_above + dq.flatten()
         # Check if the new joints are valid
         success_ikv, _ = ik.is_valid_solution(pick_joints, pick_pose)
@@ -359,9 +335,19 @@ def pick_dynamic_block(arm, detector, fk, ik, transform, time_in_seconds, dynami
     grasp_pose = transform(intercept_pos + np.array([0,0,0.01]), final_orientation)
     print(f"Grasp pose:\n{grasp_pose}")
 
-    grasp_joints, _, success, _ = ik.inverse(grasp_pose, pick_joints, method='J_pseudo', alpha=0.5)
+    
+    grasp_joints, _, success, _ = ik.inverse(grasp_pose_offset, pick_joints, method='J_pseudo', alpha=0.5)
     print(f"IK success: {success}, Grasp joints: {grasp_joints}")
 
+    for alpha in alpha_values:
+        print(f"Trying IK with alpha={alpha} for grasp_pose")
+        pick_joints_above, _, success, _ = ik.inverse(grasp_pose_offset, pick_joints, method='J_pseudo', alpha=alpha)
+        if success:
+            print("IK succeeded for grasp_pose")
+            break
+        else:
+            print(f"IK failed for alpha={alpha}")
+        
     if not success:
         print("Failed IK for final grasp descent.")
         return
