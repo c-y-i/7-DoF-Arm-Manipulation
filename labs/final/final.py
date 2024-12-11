@@ -303,11 +303,11 @@ def main():
     if team == 'blue':
         print("** BLUE TEAM  **")
         target_pose = transform(np.array([0.5, 0.1725, 0.55]), np.array([0, pi, pi]))
-        place_target = np.array([1, -0.155, 0.275])
+        place_target = np.array([0.55, -0.155, 0.27])
     else:
         print("**  RED TEAM  **")
         target_pose = transform(np.array([0.485, -0.17, 0.55]), np.array([0, pi, pi]))
-        place_target = np.array([1, 0.155, 0.27])
+        place_target = np.array([0.55, 0.17, 0.27])
     print("****************")
     input("\nWaiting for start... Press ENTER to begin!\n")
     print("Go!\n")
