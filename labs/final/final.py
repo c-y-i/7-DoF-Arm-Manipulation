@@ -97,24 +97,26 @@ def use_franka_ik_as_fallback(target_pose, seed):
 
 def move_to_target_pose(arm, target_pose, seed, ik_solver):
     print(f"Moving to target pose with seed: {seed}")
-    joints, _, success, _ = ik_solver.inverse(
-        target=target_pose,
-        seed=seed,
-        method='J_pseudo',
-        alpha=0.5
-    )
-    print(f"IK success: {success}")
-    if success:
-        arm.safe_move_to_position(joints)
-        print(f"Moved to joints: {joints}")
-        return joints, True
-    else:
-        print("IK failed, trying fallback IK")
-        fallback_joints, fallback_success = use_franka_ik_as_fallback(target_pose, seed)
-        if fallback_success:
-            arm.safe_move_to_position(fallback_joints)
-            print(f"Moved to fallback joints: {fallback_joints}")
-            return fallback_joints, True
+    alphas = [0.5, 0.2, 0.1, 0.05, 0.025]
+    for alpha in alphas:
+        print(f"Attempting IK with alpha = {alpha}")
+        joints, _, success, _ = ik_solver.inverse(
+            target=target_pose,
+            seed=seed,
+            method='J_pseudo',
+            alpha=alpha
+        )
+        print(f"IK success with alpha={alpha}: {success}")
+        if success:
+            arm.safe_move_to_position(joints)
+            print(f"Moved to joints: {joints}")
+            return joints, True
+    print("IK failed with all alpha values, trying fallback IK")
+    fallback_joints, fallback_success = use_franka_ik_as_fallback(target_pose, seed)
+    if fallback_success:
+        arm.safe_move_to_position(fallback_joints)
+        print(f"Moved to fallback joints: {fallback_joints}")
+        return fallback_joints, True
     print("Failed to move to target pose")
     return None, False
 
@@ -301,11 +303,11 @@ def main():
     if team == 'blue':
         print("** BLUE TEAM  **")
         target_pose = transform(np.array([0.5, 0.1725, 0.55]), np.array([0, pi, pi]))
-        place_target = np.array([1, -0.1, 0.275])
+        place_target = np.array([1, -0.155, 0.275])
     else:
         print("**  RED TEAM  **")
         target_pose = transform(np.array([0.485, -0.17, 0.55]), np.array([0, pi, pi]))
-        place_target = np.array([1, 0.1, 0.27])
+        place_target = np.array([1, 0.155, 0.27])
     print("****************")
     input("\nWaiting for start... Press ENTER to begin!\n")
     print("Go!\n")
