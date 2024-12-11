@@ -45,6 +45,6 @@ def get_pick_place_pose_params(block_position, stack_height, place_target):
         'grasp': ([bx, by, bz + 0.01], orientation),
         'lift': ([bx, by, bz + 0.15], orientation),
         'pre_place': ([px, py, stack_height + 0.1], orientation),
-        'place': ([px, py, stack_height - 0.025], orientation),
+        'place': ([px, py, stack_height - 0.03], orientation),
         'retreat': ([px, py, stack_height + 0.15], orientation)
     }

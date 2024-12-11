@@ -1,8 +1,20 @@
+"""
+MEAM 5200 Final Project: Pick and Place
+Author: Team 16
+Description: Main excution script for the final project competition.
+This script will perform the following tasks:
+1. Move the robot to a starting observation pose.
+2. Detect static blocks and pick/place them on the target stack.
+3. Detect dynamic blocks and pick/place them on the target stack.
+Version: 1.0.0
+"""
+
 import sys
 import numpy as np
 from copy import deepcopy
 from math import pi, sin, cos, atan2
 import rospy
+import time  # Add this import
 from core.interfaces import ArmController
 from core.interfaces import ObjectDetector
 from lib.IK_position_null import IK
@@ -14,6 +26,7 @@ from core.utils import trans, roll, pitch, yaw, transform
 from lib.franka_IK import FrankaIK
 import json
 
+
 ik = IK()
 fk = FK()
 franka_ik = FrankaIK()
@@ -21,6 +34,7 @@ franka_ik = FrankaIK()
 dynamic_stack_height_1 = 0.0
 dynamic_stack_height_2 = 0.0
 dynamic_blocks_collected = 0
+start_time = None
 
 def load_config(team):
     print(f"Loading configuration for team: {team}")
@@ -118,6 +132,7 @@ def pick_place_static(arm, blocks, place_target, data):
     stack_height = place_target[2]
     current_joints = arm.get_positions()
     for block in blocks:
+        block_start_time = time.time()
         print(f"Picking block ID: {block['id']}")
         pre_grasp = transform(
             np.array([block['position'][0], block['position'][1], block['position'][2] + 0.15]),
@@ -171,6 +186,10 @@ def pick_place_static(arm, blocks, place_target, data):
             arm.open_gripper()
             rospy.sleep(0.3)
             print("Block placed successfully")
+            block_duration = time.time() - block_start_time
+            total_duration = time.time() - start_time
+            print(f"Block placement took: {block_duration:.2f} seconds")
+            print(f"Total elapsed time: {total_duration:.2f} seconds")
         else:
             print("Failed to place block")
         retreat = transform(
@@ -186,6 +205,7 @@ def pick_place_static(arm, blocks, place_target, data):
 
 def place_dynamic_block(arm, data):
     global dynamic_stack_height_1, dynamic_stack_height_2, dynamic_blocks_collected
+    block_start_time = time.time()
     print("Placing dynamic block")
     if dynamic_blocks_collected <= 4:
         dynamicPlaceTarget = np.array(data["dynamicPlaceTarget"])
@@ -212,6 +232,10 @@ def place_dynamic_block(arm, data):
         arm.open_gripper()
         rospy.sleep(0.3)
         print("Dynamic block placed successfully")
+        block_duration = time.time() - block_start_time
+        total_duration = time.time() - start_time
+        print(f"Block placement took: {block_duration:.2f} seconds")
+        print(f"Total elapsed time: {total_duration:.2f} seconds")
     else:
         print("Failed to place dynamic block")
     retreat = transform(
@@ -277,19 +301,17 @@ def main():
     if team == 'blue':
         print("** BLUE TEAM  **")
         target_pose = transform(np.array([0.5, 0.1725, 0.55]), np.array([0, pi, pi]))
-        place_target = np.array([0.56, -0.155, 0.275])
+        place_target = np.array([1, -0.1, 0.275])
     else:
         print("**  RED TEAM  **")
         target_pose = transform(np.array([0.485, -0.17, 0.55]), np.array([0, pi, pi]))
-        place_target = np.array([0.55, 0.169, 0.27])
+        place_target = np.array([1, 0.1, 0.27])
     print("****************")
     input("\nWaiting for start... Press ENTER to begin!\n")
     print("Go!\n")
-    global dynamic_blocks_collected
+    global dynamic_blocks_collected, start_time
+    start_time = time.time()
     max_dynamic_blocks = 8
-    print("Dynamic Attempt Starts")
-    retrieve_dynamic_block(arm, data)
-    max_dynamic_blocks -= 1
     print("Beginning static block sequence")
     observation_joints, success = move_to_target_pose(arm, target_pose, start_position, ik)
     if not success:
@@ -306,11 +328,13 @@ def main():
     else:
         print("No static blocks detected")
 
+    print("Beginning dynamic block sequence")
     for i in range(max_dynamic_blocks):
+        print(f"Collecting dynamic block #{i + 1}")
         retrieve_dynamic_block(arm, data)
         if dynamic_blocks_collected >= max_dynamic_blocks:
             print("Collected maximum number of dynamic blocks")
             break
-    
+
 if __name__ == "__main__":
     main()
