@@ -147,7 +147,11 @@ def pick_place_static(arm, blocks, place_target, data):
         arm.open_gripper()
         rospy.sleep(0.2)
         grasp = transform(
-            np.array([block['position'][0], block['position'][1], block['position'][2] + 0.01]),
+            np.array([
+                block['position'][0],
+                block['position'][1],
+                block['position'][2] + 0.01 - 0.05  # Lower z-axis by 0.05 meters
+            ]),
             np.array([0, pi, pi])
         )
         grasp_joints, success = move_to_target_pose(arm, grasp, pre_grasp_joints, ik)
@@ -259,6 +263,7 @@ def retrieve_dynamic_block(arm, data):
     a_int_2 = np.array(data["acquireIntermediatePose2"])
     a_pre = np.array(data["acquirePrePose"])
     a_pose = np.array(data["acquirePose"])
+    a_pose[2] -= 0.05  # Lower z-axis by 0.05 meters
     gripperClosePos = 0.04
     gripperForce = 100
     arm.safe_move_to_position(a_int_2)
@@ -303,11 +308,11 @@ def main():
     if team == 'blue':
         print("** BLUE TEAM  **")
         target_pose = transform(np.array([0.5, 0.1725, 0.55]), np.array([0, pi, pi]))
-        place_target = np.array([0.55, -0.155, 0.27])
+        place_target = np.array([0.6, -0.1, 0.27])
     else:
         print("**  RED TEAM  **")
         target_pose = transform(np.array([0.485, -0.17, 0.55]), np.array([0, pi, pi]))
-        place_target = np.array([0.55, 0.17, 0.27])
+        place_target = np.array([0.6, 0.1, 0.27])
     print("****************")
     input("\nWaiting for start... Press ENTER to begin!\n")
     print("Go!\n")
