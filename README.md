@@ -4,6 +4,7 @@
 
 ## Project Overview
 This project implements a robotic manipulation system capable of performing pick and place operations using the Panda robot arm. The implementation includes forward kinematics, inverse kinematics, and trajectory planning.
+Part of MEAM 5200 Final Project of Fall 2024
 
 ## Project Structure
     .
@@ -144,6 +145,5 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 Project developed for MEAM 5200 "Intro to Robotics" at the University of Pennsylvania. 
 
-- The MEAM 5200 Teaching Staff provided essential guidance and technical expertise throughout development
-- Built using ROS framework and Franka Emika's comprehensive robot control libraries
-
+- Simulation done in ROS and Gazebo
+- Library credits to Emika Franka and Dr. Nadia Figueroa
